@@ -1,0 +1,28 @@
+# Ignore Python cache files
+__pycache__/
+
+# Ignore data checkpoints
+data/checkpoint/
+comparison_experiment/
+visualization_tools/
+test_tools/
+data/
+archieve/
+.idea/
+
+# Ignore generated files
+*.pkl
+*.pt
+*.pkl
+*.pdf
+*.png
+*.xlsx
+*.csv
+*.npy
+*.log
+# Ignore specific directories
+
+config.py
+Processing_SQL_I_Use.py
+dummy.log
+#.gitignore
