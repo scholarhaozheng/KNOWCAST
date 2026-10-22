@@ -102,83 +102,113 @@ Distribution, path-choice, and service-frequency autoencoders are first pre-trai
 
 ## Key mechanisms and equations
 
-The notation below condenses the paper’s equations. Let $m$ and $n$ denote origin and destination stations, $p$ a candidate path, and $\omega$ a directed network section.
+The selected equations below retain the notation and indices used in the paper. Here, $d,t$ identify the day and time interval, $m,n$ identify stations, and $\mathrm{RDS}_m$ is the set of explicitly retained destinations for origin $m$.
 
 ### Observe finished trips; allocate unfinished trips
 
-For each origin, actual departures equal finished departures plus unfinished entries:
+For each origin, the row total of actual raw OD demand equals finished trips plus entries whose journeys are still unfinished (paper Eq. 2):
 
-```math
-\sum_n I^{A}_{mn}=\sum_n I^{F}_{mn}+I^{U}_m.
-```
+$$
+\sum_{n\in\mathrm{STN}} I^{\mathrm{raw},A}_{d,t}(m,n)
+=
+\sum_{n\in\mathrm{STN}} I^{\mathrm{raw},F}_{d,t}(m,n)
++
+I^{\mathrm{raw},U}_{d,t}(m),\qquad \forall m\in\mathrm{STN}.
+$$
 
 Historical destination shares from the previous day, week, and month allocate current unfinished counts. A uniform distribution is used if a reference row has zero total flow. Separate recurrent representations are fused with attention-based gates.
 
 ### Compress destination dimensions while preserving origin totals
 
-For each origin, the model retains the highest-volume destinations identified **only from the training period** and aggregates all remaining destinations into one residual column. The mapping remains fixed during training, validation, and testing.
+For each origin, the model retains the highest-volume destinations identified **only from the training period** and aggregates all remaining destinations into the last column, indexed by $|\mathrm{RDS}|+1$ (paper Eq. 4):
 
-```math
-I^{X}_{m,\mathrm{residual}}
+$$
+I^X_{d,t}\!\left(m,|\mathrm{RDS}|+1\right)
 =
-\sum_{n\notin\mathrm{RDS}_m} I^{\mathrm{raw},X}_{mn},
+\sum_{n\in\mathrm{STN}\setminus\mathrm{RDS}_m}
+I^{\mathrm{raw},X}_{d,t}(m,n),
 \qquad X\in\{A,F\}.
-```
+$$
 
-The reported **0.23 retention ratio is a matrix-dimension retention ratio**. It is not a statement that only 23% of passenger volume is retained: the residual column preserves the remaining origin-level flow.
+The destination mapping remains fixed during training, validation, and testing. The reported **0.23 retention ratio is a matrix-dimension retention ratio**. It is not a statement that only 23% of passenger volume is retained: the residual column preserves the remaining origin-level flow.
 
 ### Guide early training with trip generation
 
-The generation loss penalizes disagreement between estimated station production/attraction and the corresponding totals implied by the OD prediction. Destination totals use a fixed training-period allocation of residual flows.
+The generation loss penalizes disagreement between estimated station production/attraction and the corresponding totals implied by the OD prediction. Destination totals use a fixed training-period allocation of residual flows. The auxiliary weight and total objective are given separately in paper Eqs. 17 and 19:
 
-```math
+$$
+w_g(\varepsilon)
+=
+w_g(0)\cdot\max\!\left(1-\alpha_{\mathrm{decay}}\cdot\varepsilon,0\right).
+$$
+
+$$
 \mathcal L_{\mathrm{total}}^{(\varepsilon)}
 =
 \mathcal L_{\mathrm{OD}}
 +
-w_g(\varepsilon)\mathcal L_g,
-\qquad
-w_g(\varepsilon)=w_g(0)\max(1-\alpha_{\mathrm{decay}}\varepsilon,0).
-```
+w_g(\varepsilon)\cdot\mathcal L_g.
+$$
 
 The main OD objective is MAE in the original flow-value scale. With the selected $\alpha_{\mathrm{decay}}=0.1$, the auxiliary weight decays to zero over the first ten epochs.
 
 ### Estimate distribution with a gravity model
 
-```math
-\gamma^{\mathrm{TD}}_{mn}
+The doubly constrained trip-distribution feature uses production, attraction, balancing coefficients, and impedance (paper Eq. 20):
+
+$$
+\gamma^{\mathrm{TD}}_{(m,n),d,t}
 =
-B^O_mP_mB^D_nA_n\exp(-\zeta c_{mn}).
-```
+B^O_{m,d,t}P_{m,d,t}
+B^D_{n,d,t}A_{n,d,t}
+f(c_{mn,d,t}),
+\qquad f(c)=e^{-\zeta c},\ \zeta>0.
+$$
 
 Production $P$, attraction $A$, and generalized impedance $c$ vary with conditions. The deterrence coefficient $\zeta$ is pre-calibrated offline and held fixed during main-model training; balancing coefficients are updated through iterative proportional fitting.
 
 ### Infer paths and sections from OD forecasts
 
-```math
-U_{p}=\sum_{\phi}\beta_{\phi}\psi_{\phi}(p),
-\qquad
-\Pr(p\mid m,n)=
-\frac{\exp(U_p)}
-{\sum_{q\in\mathcal P_{mn}}\exp(U_q)}.
-```
+For candidate path $p_{\mathrm{od},r}$, a trainable utility function and Logit normalization yield path-choice probabilities (paper Eqs. 22–23). We write $p_r$ when the OD pair is clear:
 
-```math
-\widehat{\mathrm{PathFlow}}_{mn,p}
+$$
+U_{\mathrm{od},r,d,t}
 =
-\widehat I_{mn}\Pr(p\mid m,n),
-```
+\sum_{\phi=1}^{\Phi}
+\beta_{\phi}\psi_{\phi,d,t}(p_{\mathrm{od},r}).
+$$
 
-```math
-\widehat{\mathrm{LinkFlow}}_{\omega}
+$$
+\Pr_{d,t}(p_r\mid\mathrm{od})
 =
-\sum_{(m,n)\in\mathcal R}
-\widehat I_{mn}
-\sum_{p\in\mathcal P_{mn}}
-\Pr(p\mid m,n)\,u(p,\omega).
-```
+\frac{\exp(U_{\mathrm{od},r,d,t})}
+{\sum_{p_\xi\in\mathcal P_{\mathrm{od}}}\exp(U_{\mathrm{od},\xi,d,t})}.
+$$
 
-Here, $\mathcal R$ is the set of **explicitly retained real OD pairs**, and $u(p,\omega)$ indicates whether a path traverses a section. The residual destination column is excluded from path and section assignment because it has no single destination or unique candidate-path set.
+For a forecast at offset $\lambda$, the model converts predicted OD demand into path and directed-section flows (paper Eqs. 28–29):
+
+$$
+\mathrm{PathFlow}^{(d,t,\lambda)}_{m,n_m^{(\tilde n)},p_r}
+=
+\widehat I^{(d,t,\lambda)}_{m,n_m^{(\tilde n)}}\,
+\Pr^{(d,t,\lambda)}\!\left(p_r\mid m,n_m^{(\tilde n)}\right).
+$$
+
+$$
+\begin{aligned}
+\mathrm{LinkFlow}_{d,t,\lambda,\eta,\mu}
+&=
+\sum_{m\in\mathrm{STN}}
+\sum_{\tilde n=1}^{|\mathrm{RDS}|}
+\widehat I^{(d,t,\lambda)}_{m,n_m^{(\tilde n)}} \\
+&\quad\cdot
+\sum_{p_r\in\mathcal P_{m,n_m^{(\tilde n)}}}
+\Pr^{(d,t,\lambda)}\!\left(p_r\mid m,n_m^{(\tilde n)}\right)
+u_{(p_r,(\eta,\mu))}.
+\end{aligned}
+$$
+
+Here, $n_m^{(\tilde n)}$ is the $\tilde n$-th retained destination for origin $m$, and $u_{(p_r,(\eta,\mu))}$ indicates whether path $p_r$ traverses directed section $(\eta,\mu)$. The inner destination sum stops at $|\mathrm{RDS}|$; the residual column $|\mathrm{RDS}|+1$ is excluded because it has no single destination or unique candidate-path set.
 
 The Softmax normalization has no trainable parameters. The utility coefficients are trainable, and path probabilities sum to one for each OD pair.
 

@@ -1,1 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="t d"><title id="t">KNOWCAST</title><desc id="d">Transportation knowledge integrated into metro OD forecasting and path flow estimation.</desc><rect width="1200" height="360" rx="12" fill="#0c171c"/><path d="M60 47h30" stroke="#baff68" stroke-width="3"/><text x="104" y="52" fill="#b3cbd4" font-family="Arial,sans-serif" font-size="13" letter-spacing="2">TRANSPORTATION RESEARCH PART C · 2026</text><text x="54" y="186" fill="white" font-family="Arial,sans-serif" font-size="114" font-weight="bold" letter-spacing="-7">KNOW<tspan fill="#baff68">CAST</tspan></text><text x="62" y="232" fill="#cfdee3" font-family="Arial,sans-serif" font-size="21">Transportation knowledge. Deep learning. Connected predictions.</text><g font-family="Arial,sans-serif" font-size="13"><text x="63" y="308" fill="#91b0bc">154 STATIONS</text><text x="215" y="308" fill="#91b0bc">15-MIN INTERVALS</text><text x="405" y="308" fill="#baff68">25% LOWER MAE</text></g><g fill="none" stroke-width="5" stroke-linecap="round"><path d="M820 103h66l75 78h146" stroke="#baff68"/><path d="M820 241h66l75-78h146" stroke="#70e2e0"/></g><g fill="#0c171c" stroke-width="4"><circle cx="840" cy="103" r="8" stroke="#baff68"/><circle cx="982" cy="181" r="8" stroke="#baff68"/><circle cx="1080" cy="181" r="8" stroke="#baff68"/><circle cx="840" cy="241" r="8" stroke="#70e2e0"/><circle cx="982" cy="163" r="8" stroke="#70e2e0"/></g><text x="813" y="295" fill="#91b0bc" font-family="Arial,sans-serif" font-size="12" letter-spacing="1">OD DEMAND · PATH CHOICE · SECTION FLOW</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">KNOWCAST — Predict the flow. Reveal the route.</title>
+  <desc id="desc">A metro network schematic connects OD demand to inferred paths and section flows.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0b1a21"/><stop offset="1" stop-color="#193b3c"/></linearGradient>
+    <linearGradient id="rail" x2="1" y2="1"><stop stop-color="#baff68"/><stop offset="1" stop-color="#72d9d1"/></linearGradient>
+    <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse"><path d="M60 0H0V60" fill="none" stroke="#86b6a6" stroke-opacity=".12"/></pattern>
+  </defs>
+  <rect width="1200" height="360" rx="18" fill="url(#bg)"/>
+  <rect width="1200" height="360" rx="18" fill="url(#grid)"/>
+  <circle cx="66" cy="54" r="5" fill="#baff68"/>
+  <text x="83" y="59" fill="#e4f2ec" font-family="Arial,sans-serif" font-size="16" font-weight="bold" letter-spacing="3">KNOWCAST</text>
+  <text x="65" y="143" fill="#ffffff" font-family="Arial,sans-serif" font-size="56" font-weight="bold" letter-spacing="-3">Predict the flow.</text>
+  <text x="65" y="212" fill="#baff68" font-family="Georgia,serif" font-size="70" font-style="italic" letter-spacing="-3">Reveal the route.</text>
+  <text x="67" y="263" fill="#b5cec7" font-family="Arial,sans-serif" font-size="17">Knowledge-integrated OD forecasting and path-flow estimation</text>
+  <path d="M66 307H600" stroke="#5d807d"/>
+  <text x="67" y="334" fill="#baff68" font-family="Arial,sans-serif" font-size="12" letter-spacing="2">TRANSPORTATION RESEARCH PART C · 2026</text>
+  <g transform="translate(675 36)">
+    <rect width="465" height="288" rx="16" fill="#10272c" stroke="#64877e"/>
+    <path d="M35 44H430M35 104H430M35 164H430M35 224H430M80 18V270M160 18V270M240 18V270M320 18V270M400 18V270" fill="none" stroke="#6b9f9a" stroke-opacity=".17"/>
+    <path d="M32 151H102L185 66H283L368 151H433" fill="none" stroke="url(#rail)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M32 151H102L185 237H283L368 151H433" fill="none" stroke="#8bcfff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M32 151H433" fill="none" stroke="#f1e9b1" stroke-opacity=".75" stroke-width="4" stroke-linecap="round"/>
+    <g fill="#10272c" stroke="#e8fff0" stroke-width="4"><circle cx="32" cy="151" r="11"/><circle cx="185" cy="66" r="7"/><circle cx="185" cy="237" r="7"/><circle cx="283" cy="66" r="7"/><circle cx="283" cy="237" r="7"/><circle cx="433" cy="151" r="11"/></g>
+    <text x="31" y="283" fill="#bad1ca" font-family="Arial,sans-serif" font-size="11" letter-spacing="1">OD DEMAND</text>
+    <text x="349" y="283" fill="#bad1ca" font-family="Arial,sans-serif" font-size="11" letter-spacing="1">PATH FLOW</text>
+  </g>
+</svg>
