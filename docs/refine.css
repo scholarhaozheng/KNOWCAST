@@ -393,19 +393,11 @@ h2 em { font: italic 400 1.13em/.9 var(--display); letter-spacing: -.025em; colo
   stroke-width: 5;
   stroke-dasharray: none;
 }
-.framework-hotspot.is-active .framework-hit-shape {
-  fill-opacity: .14;
-  stroke-opacity: .85;
-  stroke-width: 5;
-  stroke-dasharray: none;
-}
-.framework-hotspot.is-active:hover .framework-hit-shape,
-.framework-hotspot.is-active:focus-visible .framework-hit-shape { fill-opacity: .28; }
-.framework-stage-hotspot .framework-hit-shape { stroke-opacity: .08; }
+.framework-stage-hotspot .framework-hit-shape { stroke-opacity: 0; }
 .framework-stage-hotspot:hover .framework-hit-shape,
 .framework-stage-hotspot:focus-visible .framework-hit-shape,
 .framework-stage-hotspot.is-hovered .framework-hit-shape { fill-opacity: .09; stroke-opacity: .8; }
-.framework-stage-hotspot.is-active .framework-hit-shape { fill-opacity: .045; stroke-opacity: .7; }
+.framework-group-hit-area { fill: transparent; stroke: none; pointer-events: all; }
 .framework-group-badge {
   fill: #145d4e;
   stroke: #dcffae;
@@ -583,8 +575,8 @@ h2 em { font: italic 400 1.13em/.9 var(--display); letter-spacing: -.025em; colo
 }
 .framework-stage-grid article:target,
 .framework-stage-grid article.is-target {
-  border-color: #39a273;
-  box-shadow: inset 0 0 0 2px #39a273, 0 12px 28px #194f3221;
+  background: #f6fbf7;
+  border-color: #c4dfcb;
 }
 .framework-stage-grid article:focus-visible,
 .framework-service-details > div:focus-visible,
@@ -623,8 +615,8 @@ h2 em { font: italic 400 1.13em/.9 var(--display); letter-spacing: -.025em; colo
 }
 .framework-service-details > div:target,
 .framework-service-details > div.is-target {
-  border-color: #31956e;
-  box-shadow: inset 0 0 0 1px #31956e;
+  background: #e6f4e9;
+  border-color: #b8dac3;
 }
 .framework-service-details h4 { margin: 6px 0; }
 .framework-service-details p { margin: 0; font-size: 13px; }
