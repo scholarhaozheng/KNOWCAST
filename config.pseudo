@@ -1,5 +1,5 @@
 MODULE config
-STATUS non-executable configuration specification.
+FORMAT Pseudocode.
 REFERENCE specs/paper_settings.yaml supplies the paper comparison values.
 PARAMETERS Missing run values are supplied by the caller; rounded paper values retain their precision metadata.
 ENTRYPOINT CONTRACT:
@@ -10,7 +10,7 @@ ENTRYPOINT CONTRACT:
     experiment receives args.mode=experiment and an explicit experiment_kind.
     diagnostic_export receives args.mode=diagnostic_export.
     study_mode is search, train, or search_train; its train value means final training from a study.
-    A plain main-training invocation never becomes study-based final training by matching the word train.
+    The entrypoint distinguishes main_training from study-based final training.
 
 PROCEDURE parse_arguments(request)
     INPUT request from command-line or structured fields.
@@ -26,7 +26,7 @@ PROCEDURE parse_arguments(request)
             COPY that value into study_mode only when no conflicting study_mode was supplied.
             args.mode <- tune; mode <- tune; record the adapter version.
         REQUIRE args.mode=tune and args.study_mode in {search,train,search_train} after that normalization.
-        ACCEPT FINAL_CONFIG_FILES as the source-compatible list of final configurations.
+        ACCEPT FINAL_CONFIG_FILES as the list of final configurations.
         Validate that list only for study modes train or search_train.
     ELSE:
         REJECT study_mode and FINAL_CONFIG_FILES unless a declared compatibility adapter owns them.
@@ -41,7 +41,7 @@ PROCEDURE parse_arguments(request)
     ACCEPT requested dataset splits and enabled component variants.
     ACCEPT stage BUILD / REUSE_VERIFIED / DISABLED_BY_MODEL_VARIANT selections for preprocessing.
     ACCEPT dry specification validation independently from any numerical run request.
-    REJECT unknown arguments instead of ignoring misspelled configuration keys.
+    REJECT unknown arguments.
     NORMALIZE path strings without reading credentials or starting external actions.
     RECORD which values were supplied explicitly and which come from an identified run artifact.
     Argument parsing returns an isolated data record.
@@ -106,9 +106,9 @@ PROCEDURE validate_configuration(cfg,invocation,paper_reference)
     REQUIRE interval duration, timezone, service-day boundary, and interval closure rules.
     REQUIRE train/validation/test target periods and non-overlap.
     REQUIRE split-boundary window policy and historical-reference gap policy.
-    IF claiming the published-study task setting:
+    IF the published-study task setting is selected:
         COMPARE network and date settings with paper_settings.dataset.
-        REQUIRE deviations to be labeled as reconstruction variants.
+        REQUIRE configuration deviations to be recorded with the run.
     END IF
     REQUIRE raw AFC observation/label schemas when preparing finished and unfinished demand.
     REQUIRE event-time availability and invalid/unresolved-journey policies.
@@ -120,11 +120,11 @@ PROCEDURE validate_configuration(cfg,invocation,paper_reference)
     REQUIRE graph representation and attention message direction.
     IF building the station/line registry from source tables:
         REQUIRE explicit network_schema for station/line/topology source parsing.
-        PASS network_schema explicitly to request_suzhou rather than relying on an ambient variable.
+        PASS network_schema to request_suzhou.
     ELSE require the verified existing registry/topology manifests, not unused raw workbook locations.
     IF service_inputs_required:
         REQUIRE raw K7 frequency units, line ordering, physical support,known-status and availability metadata.
-        USE trains/hour as the declared reconstruction convention, not a recovered paper storage unit.
+        USE trains/hour as the canonical frequency unit.
         IF reading timetables/headways:
             REQUIRE declared headway conversion and timetable_schema.network_schema matching the network schema.
         END IF
@@ -166,7 +166,7 @@ PROCEDURE validate_configuration(cfg,invocation,paper_reference)
     IF generation guidance is enabled:
         REQUIRE initial_generation_loss_weight >= 0 and alpha_decay >= 0.
         REQUIRE the formula epoch-index origin.
-        STORE that convention as epoch_origin; do not derive it from displayed epoch labels.
+        STORE the configured indexing convention as epoch_origin.
         REQUIRE the minibatch estimator for the Eq.(16) sum and Eq.(18) mean.
         REQUIRE minibatch_estimator, example multiplicity, sampling weights, and accumulation rules.
         REQUIRE fixed training-derived residual shares for destination reconstruction.
@@ -190,7 +190,7 @@ PROCEDURE validate_configuration(cfg,invocation,paper_reference)
     IF the utility layer is trainable:
         REQUIRE documented feature units and initial coefficients.
         COMPARE reported rounded station/transfer values with paper_settings.
-        RECORD supplied numerical precision rather than asserting original exact values.
+        RECORD the supplied numerical precision.
     END IF
     PHASE 3: Check the selected entrypoint's parameters.
     IF mode=train:
@@ -199,7 +199,7 @@ PROCEDURE validate_configuration(cfg,invocation,paper_reference)
         REQUIRE an explicit cfg.train.start_epoch and a positive cfg.train.epochs count.
         REQUIRE cfg.train.target_multiplicity and observation_policy for the objective index.
         STORE optimizer-specific options in cfg.train.optimizer_parameters.
-        REJECT inconsistent duplicate learning-rate values instead of choosing silently.
+        REJECT inconsistent duplicate learning-rate values.
         THEN inject canonical cfg.train.base_lr into cfg.train.optimizer_parameters.learning_rate explicitly.
         REQUIRE the OD objective estimator, target-matrix multiplicity and sampling/accumulation policy.
         These are needed for OD-only training too; generation-specific scale/epoch settings remain conditional.
@@ -226,7 +226,7 @@ PROCEDURE validate_configuration(cfg,invocation,paper_reference)
         REQUIRE genuine sample IDs, masks, expected counts, and horizon timestamps.
         REQUIRE per-horizon metrics followed by the declared mean over horizons.
         REQUIRE WMAPE denominator-zero policy and percentage metadata.
-        REQUIRE output-nonnegativity behavior from the saved model, not a new plot-time rule.
+        REQUIRE the saved model's output-nonnegativity policy.
     END IF
     IF mode=tune:
         REQUIRE entrypoint=bayes_study,task mode=tune and separate study_mode.
@@ -273,7 +273,7 @@ END PROCEDURE
 PROCEDURE expose_args(args)
     INPUT already parsed and validated args.
     PARAMETERS args.
-    OUTPUT explicit compatibility object for original callers.
+    OUTPUT the compatibility object for the calling interface.
     PROVIDE config_filename and only the declared caller-required fields.
     For bayes_study expose entrypoint,mode=tune,study_mode,FINAL_CONFIG_FILES and study options.
     For main_training expose entrypoint,mode=train,config_filename,resume_checkpoint.

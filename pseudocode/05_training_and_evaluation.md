@@ -1,18 +1,18 @@
-# Training and evaluation specification
+# Training and evaluation
 
-Source: [the 37-page paper](../docs/assets/knowcast-paper.pdf), especially Sections 4.3-4.6 (pp. 13-18), 5.1-5.2 (pp. 20-24), and 5.5-5.6 (pp. 32-33). Page numbers below are one-based PDF page numbers.
+This chapter follows Sections 4.3–4.6 (pp. 13–18), 5.1–5.2 (pp. 20–24) and 5.5–5.6 (pp. 32–33) of the [paper](../docs/assets/knowcast-paper.pdf).
 
-## Inputs and unresolved choices
+## Data and task settings
 
-The reported City S network has 154 stations and 17 transfer stations, with 15-minute intervals. The raw OD matrix contains 154 x 154 entries, including diagonal entries. The main comparisons use a fixed 0.23 matrix-dimension retention ratio. Each origin has its own retained-destination mapping; one additional residual column preserves flow to all non-retained destinations. The ratio does not mean that only 23% of passengers are retained.
+The paper's City S network has 154 stations, 17 transfer stations and 15-minute intervals. Raw OD matrices contain 154 × 154 entries, including the diagonal. The main comparison uses a 0.23 matrix-dimension retention ratio. Each origin retains its own destination map; the residual column preserves flow to all other destinations.
 
-Training covers March 1-31, 2023; validation covers May 1-10; testing covers May 11-20. April is the reported temporal gap. A future implementation must explicitly resolve which historical reference observations are available for a May prediction and how windows crossing split boundaries are handled. The gap alone does not answer these questions.
+Training covers March 1–31, 2023; validation covers May 1–10; testing covers May 11–20. April separates training and evaluation. Configuration determines which available historical observations supply context for May forecasts and how windows cross split boundaries.
 
-The exact main-run lookback and forecast lengths, batch size, full training budget, seed, optimizer settings, and several preprocessing details are not unambiguously specified by the paper text. They remain `null` in the settings file. Section 5.6's examples `(lookback=2, forecast=4)` and `(lookback=4, forecast=12)` are sensitivity settings, not evidence of the main-run configuration. Likewise, do not recover an exact integer destination dimension by rounding `154 * 0.23`.
+Supply lookback and forecast lengths, batch size, training budget, seed, optimizer settings and preprocessing in configuration. The settings file uses `null` for values the paper leaves unspecified. Section 5.6 reports sensitivity windows `(lookback=2, forecast=4)` and `(lookback=4, forecast=12)`. Set the integer retained count `R` separately from the reported dimension ratio.
 
 ## Preparation and pretraining
 
-The paper specifies independent trip-generation estimation, offline gravity calibration, and reconstruction pretraining followed by joint fine-tuning of the feature encoders. This reconstruction prescribes fitting all generation estimators, the gravity coefficient, autoencoders, scalers, destination mappings, and residual shares using the training split only. Validation and test use frozen parameters and forward computations; validation may select a configuration or checkpoint but does not fit these components. Time-specific IPF and feature computation may still use admissible inputs during evaluation without updating fitted parameters. These are requirements for a future implementation, not evidence that a particular historical run passed them.
+Pretrain the generation estimators and feature encoders, and calibrate gravity before fitting the main predictor. Use training data for these stages and for destination maps, residual shares and transforms. Validation selects configurations and checkpoints. Evaluation freezes fitted parameters while computing time-specific knowledge and IPF from available inputs.
 
 ```text
 REQUIRE resolved task dimensions, data manifests, and preprocessing policies
@@ -53,13 +53,13 @@ FINE-TUNE the feature encoders and full-model utility coefficients
 FOR every validation / test pass, freeze all parameters and use forward computation only
 ```
 
-The paper does not supply all auxiliary-model architectures, pretraining schedules, calibration constants, or data artifacts needed to execute these steps. Changing the latent dimension during hyperparameter search also requires a compatible pretrained encoder; how these checkpoints are produced and isolated must be recorded rather than guessed.
+Configuration supplies auxiliary architectures, pretraining schedules, calibration parameters and artifact locations. Each searched latent dimension selects or trains a compatible encoder checkpoint.
 
 ## Loss and one training epoch
 
 Let `I_hat[b, h, m, k]` and `I_true[b, h, m, k]` be predicted and observed compressed OD flows in **original passenger-flow units**. Here `b` is an example, `h` a forecast step, `m` a real origin, and `k` an origin-specific retained slot or the residual slot. `destination(m,k)` maps a retained slot to a real destination. Its value can differ between origins at the same slot index.
 
-Equation (15) reconstructs destination totals for the attraction loss. Equation (16) defines a sum of squared station residuals, while Equation (18) defines the mean absolute OD error over the full training objective. A batch sum combined with a batch mean does not by itself specify an estimator of those full-data objectives. The sampling, reduction, accumulation, and relative scaling below are explicit implementation decisions and must be declared before training.
+Eq. (15) constructs destination totals for attraction loss. Eq. (16) sums squared station residuals; Eq. (18) averages absolute OD errors. The minibatch estimator specifies sampling, multiplicity, reduction, accumulation and relative scaling.
 
 ```text
 DEFINE full L_OD according to Eq. (18), including its N_train denominator
@@ -103,9 +103,9 @@ FOR each training epoch with its declared epsilon:
   finish any final partial group using its explicitly declared scaling rule
 ```
 
-With the reported selected `alpha_decay=0.1`, evaluating the formula at `epsilon=0`, `9`, and `10` gives `w0`, `0.1*w0`, and zero; it remains zero for `epsilon>=10`. These are illustrative formula evaluations, not a recovered convention for numbering training-loop epochs. That convention remains unresolved. The selected `w0=0.0264` is a rounded reported value. This document prescribes no fixed minibatch rescaling. Replacing the squared-error sum with an absolute mean residual is not equivalent: positive and negative station errors can cancel.
+With `alpha_decay=0.1`, formula indices `epsilon=0`, `9` and `10` give weights `w0`, `0.1*w0` and zero. The weight stays zero for `epsilon>=10`. Configuration maps displayed epochs to `epsilon`. The paper reports the rounded selected value `w0=0.0264`.
 
-The attraction term cannot sum compressed columns as if each column were the same destination for every origin. The residual slot is a mixture of destinations, not an additional station. The generation estimator's freezing policy during main training is not fully specified by the paper and must be declared. If frozen, this does not justify detaching the OD prediction or placing its loss calculation inside a gradient-disabled scope.
+Attractions gather retained columns by real destination and distribute the residual using training shares. Prediction-side totals retain gradients. Configuration selects whether the independently pretrained generation estimator stays frozen or is fine-tuned.
 
 ## Hyperparameter search and model selection
 
@@ -133,13 +133,13 @@ SELECT the final checkpoint by validation MAE only
 FREEZE the model, preprocessing, and evaluation rules before final test evaluation
 ```
 
-Merely constructing a pruner does not implement pruning: intermediate values must reach it and its decision must stop the trial. The pseudocode's checkpoint and logging steps make a future implementation reviewable; they do not recover undocumented tie-breaking or original study internals. A new search is not expected to reproduce the original trial index or rounded optimum without the original study and environment.
+Report intermediate validation scores to the pruner and stop trials when requested. Configuration defines checkpoint tie-breaking, sampler/pruner settings and random seeds.
 
-No test score may control hyperparameter selection, early stopping, or checkpoint selection. The paper describes its plotted test curves as post-hoc diagnostics (p. 24). Any reconstruction of those curves must retain that separation.
+Validation MAE controls hyperparameter selection, early stopping and checkpoint selection. Test curves are post-hoc diagnostics (p. 24).
 
 ## OD evaluation
 
-During evaluation, the decoder uses its previous predictions, not future observed OD labels. Only exogenous information that was known, announced, or forecastable at the prediction origin can be supplied for future steps (Section 3.2, p. 8).
+Evaluation feeds preceding predictions into the decoder. Future exogenous inputs are plans, announced conditions or forecasts available at the prediction origin (Section 3.2, p. 8).
 
 ```text
 FOR each forecast horizon h:
@@ -154,13 +154,13 @@ FOR each forecast horizon h:
 REPORT arithmetic mean over horizons separately for MAE, RMSE, and WMAPE
 ```
 
-This order matters: pooling all horizons before taking the RMSE or WMAPE is generally different. If a WMAPE denominator is zero, the implementation needs a declared policy; none is recovered here. Missing-value handling and output clipping also require explicit decisions, not assumptions imported from historical code. For segmented demand analysis, Equation (37) defines `SMAPE = 100 * mean(abs(prediction - observation) / ((abs(observation) + abs(prediction))/2 + 1e-6))`.
+Compute metrics for each horizon before averaging. Configuration supplies zero-denominator, missing-value and output-clipping policies. For demand segments, Eq. (37) defines `SMAPE = 100 * mean(abs(prediction - observation) / ((abs(observation) + abs(prediction))/2 + 1e-6))`.
 
-Table 3 reports full-model MAE 1.02, RMSE 3.04, and WMAPE 54.25%, alongside ten baselines. The ablation and alternative-learner results in Section 5.3 are also **paper-reported results**, not outputs reproduced by this repository. A changed compression ratio changes the prediction target and must be presented as task-setting sensitivity, not a like-for-like improvement.
+Table 3 reports full-model MAE 1.02, RMSE 3.04 and WMAPE 54.25%, with ten baselines. Section 5.3 reports ablations and an alternative learner. Compression-ratio experiments change the prediction target and are evaluated as task-setting sensitivity.
 
 ## Indirect path and section-load assessment
 
-There are no observed path labels for direct path-flow validation. Section 5.5 (pp. 32-33) compares aligned estimated train loads with sampled observations. Path assignment operates only on explicitly retained real OD pairs; the residual slot has no unique destination or candidate-path set.
+Section 5.5 (pp. 32–33) assesses path-derived section flows indirectly through sampled train loads. Assignment covers retained real OD pairs; residual demand enters through the subsequent compensation step.
 
 ```text
 FOR each retained real OD pair and forecast step:
@@ -187,17 +187,12 @@ The observation protocol has 14 daily time slices over 10 days, including weeken
 
 This indirect operational assessment retains calibration identities, separates calibration from evaluation observations, and reports the coverage and units of each matched estimate.
 
-## Implementation checks
+## Numerical checks
 
-Use these checks when implementing the algorithms:
+The [validation scripts](../validation/scripts/README.md) provide small examples for the following calculations:
 
-- Verify split membership, prediction-origin information availability, training-only fitting of every generation estimator, gravity coefficient, autoencoder, mapping, scaler, and residual share; verify frozen validation/test forward passes and explicit treatment of the April gap.
-- Verify destination restoration with a hand example where the same compressed column represents different stations for different origins; verify conservation of origin and reconstructed destination totals.
-- Verify squared generation loss numerically and verify a nonzero gradient from that loss to OD-predictor parameters when the residual is nonzero and its weight is active.
-- Verify the declared minibatch estimator and its sampling/scaling/accumulation rules against the full objectives; verify formula values at `epsilon=0`, `9`, and `10` separately from the declared epoch-index convention.
-- Verify recorded utility coefficients were available before generation of the section-probability pretraining matrices; verify persistent pretrained encoder parameters receive forecasting gradients and are included in optimization/checkpoints.
-- Verify the trial reports reach the pruner, pruning can occur, all Table 2 domains are used, and neither model nor trial selection can access test scores.
-- Verify metric formulas and per-horizon aggregation with hand examples, including declared handling of zero denominators, missing values, and negative predictions.
-- Verify conditional path probabilities sum to one over feasible paths, retained-OD path flow is conserved, and no residual-column flow receives an invented route.
-- Verify section-load alignment units, calibration provenance, temporal boundaries, and uncertainty before interpreting Table 8-like comparisons.
-- Archive exact configs, software versions, seeds, data/split identifiers, pretrained and final checkpoints, predictions, and search records. Compare newly generated results with the reported values only after these artifacts exist; do not label the reported values as regenerated outputs.
+- Flow conservation through compression, unfinished allocation and residual redistribution.
+- Squared generation loss, original-scale OD MAE and their prediction gradients.
+- Minibatch scaling, accumulation and formula weights at `epsilon=0`, `9` and `10`.
+- Per-horizon metrics, conditional path probabilities and retained-OD assignment.
+- Temporal-kernel mass accounting and train-load matching by section, line, direction and time.

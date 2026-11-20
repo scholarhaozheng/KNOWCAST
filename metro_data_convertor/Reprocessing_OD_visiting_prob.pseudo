@@ -1,4 +1,5 @@
 MODULE Reprocessing_OD_visiting_prob
+FORMAT Pseudocode.
 PURPOSE Tensorize OD-conditioned directed section probabilities.
 PAPER Eqs. (24)–(25).
 

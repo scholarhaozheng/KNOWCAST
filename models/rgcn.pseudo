@@ -1,5 +1,6 @@
 MODULE models.rgcn
-PURPOSE Legacy basis-decomposed relation-mixture graph convolution.
+FORMAT Pseudocode.
+PURPOSE Basis-decomposed relation-mixture graph convolution.
 PAPER Relational alternative retained separately from Eq. (31)'s graph attention.
 INPUT x[V,I], edges[2,E], relation coefficients[E,R_rel], optional edge_norm[E].
 OUTPUT Node features[V,O].

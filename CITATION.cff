@@ -1,6 +1,6 @@
 cff-version: 1.2.0
-message: "Please cite the published KNOWCAST paper. This edition contains reconstructed pseudocode, not the original experiment-producing implementation."
-title: "KNOWCAST paper companion and reconstructed pseudocode"
+message: "Please cite the KNOWCAST paper."
+title: "KNOWCAST algorithms and pseudocode"
 type: software
 authors:
   - family-names: Zheng

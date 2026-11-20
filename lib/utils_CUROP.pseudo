@@ -1,8 +1,7 @@
 MODULE lib.utils_CUROP
-STATUS non-executable, paper-aligned reconstruction with preserved support utilities
+FORMAT Pseudocode.
 PAPER §§3.2, 4.2, 4.3 and 5.1; Eqs.2–19; original-scale evaluation
 PURPOSE Load, align, normalize, batch and transfer all forecasting inputs.
-BOUNDARY This file specifies algorithms, not a recovered runnable implementation.
 
 INDEX CONVENTIONS
     N <- number of real stations in the persisted station order.
@@ -15,7 +14,7 @@ INDEX CONVENTIONS
     H <- historical intervals; F <- forecast intervals; H and F may differ.
     Destination slot s denotes RDS[m,s], not global destination s.
     Software retained slots are 0..R-1 and the last slot R=K-1 is the origin-specific residual set.
-    sample_id identifies the forecast origin, not the current storage row.
+    sample_id is a stable identifier of the forecast origin across storage permutations.
     Timestamp arrays carry every step's timestamp and information-availability time.
 
 DATA CONTRACT BatchRecord
@@ -29,7 +28,7 @@ DATA CONTRACT BatchRecord
     representation_kind <- 'unfinished_allocation' for all three model-facing allocation streams.
     allocation_scale <- 'normalized'; allocation_count_scale <- 'passenger_count'.
     Archived history_day_raw/history_week_raw/history_month_raw are observed reference OD counts.
-    Reference counts are never passed to the model under an allocation field name.
+    Model allocation fields contain allocated unfinished counts in model scale.
     encoder_knowledge[B,H,...] <- historical generation/distribution/path/service inputs.
     decoder_knowledge[B,F,...] <- future inputs admissible at the forecast origin.
     Distribution-enabled steps carry dynamic_impedance[N,N] in fixed physical-station order.
@@ -37,7 +36,7 @@ DATA CONTRACT BatchRecord
     Each time-indexed knowledge record carries auxiliary_context_by_task for active production/attraction estimators.
     Each task context contains a full declared DCRNN input window or an immutable cutoff-safe reference,
         L_aux_h,L_aux_f,target_offset,auxiliary forecast origin and graph/scaler/checkpoint identifiers.
-    Auxiliary sequence lengths are independent of main H/F; one current station-feature row is not a Seq2Seq window.
+    Auxiliary sequence lengths are independent of main H/F and define complete encoder/decoder covariate windows.
     For the declared generic-exogenous ablation only, each knowledge step may carry
         generic_exogenous_inputs with raw station-aligned features, feature_schema_id and availability tags.
     This input is separate from calibrated C2/C3 knowledge and auxiliary_context_by_task.
@@ -49,7 +48,7 @@ DATA CONTRACT BatchRecord
     ServiceRecord.known_status distinguishes observed/announced service values from unavailable/unknown inputs.
     ServiceRecord carries representation_kind='departure_frequency', raw_units='trains_per_hour',
         encoder_scale in {'raw','normalized'}, frequency_transform_id and line_order_id.
-    Legacy Time_DepartFreDic_Array aliases encoder_frequency only; it never erases the raw view.
+    Time_DepartFreDic_Array aliases encoder_frequency; raw_frequency remains a separate field.
     sample_ids[B], valid_mask[B], forecast_origin[B], xtime[B,H], ytime[B,F].
     target_observation_mask[B,F,N,K] marks available label cells, separately from sample padding.
     station_order_id, RDS_id, residual_shares_id and transform_id.
@@ -78,7 +77,7 @@ MODULE INITIALIZATION
     Receive component switches through a validated context at construction time.
     Preserve the earlier four_step_method/history_distribution naming as aliases.
     Generation, distribution, frequency and assignment switches remain independent.
-    Validate requested dependencies explicitly rather than importing config on load.
+    Validate dependencies from the supplied configuration.
     Supply an immutable context to every loader and collation call.
 
 CLASS DataLoader
@@ -89,7 +88,7 @@ CLASS DataLoader
     FIELDS schema, storage_handles, owned_temporary_paths.
     INVARIANT all enabled streams share a sample axis and sample identity.
     INVARIANT padding is distinguishable from real observations.
-    INVARIANT shuffling permutes samples, never steps within a sample.
+    INVARIANT shuffling permutes sample indices while preserving each sample's step order.
     INVARIANT evaluation retains a reproducible prediction-to-target mapping.
 END CLASS
 
@@ -108,12 +107,12 @@ PROCEDURE DataLoader.__init__(
     REQUIRE batch_size is a positive integer.
     REQUIRE num_workers is a nonnegative integer selected for the environment.
     BIND independent component flags and required-input predicates from component_context.
-    Reject unresolved switches; do not read global command-line arguments or infer flags from field presence.
+    Resolve component switches from the supplied configuration and reject unresolved switches.
     CREATE an empty stream registry.
     IF data_dict is supplied:
         READ x_od, y_od, xtime and ytime from that mapping.
         READ optional old names only when the schema identifies their semantics.
-        REJECT runtime history_day/history_week/history_month fields rather than infer raw-versus-allocation meaning.
+        REJECT ambiguous runtime history_day/history_week/history_month fields.
         IF component_context.history_distribution:
             READ canonical allocation_day/week/month and optional count-scale copies.
             REQUIRE representation_kind='unfinished_allocation' and allocation_scale='normalized'.
@@ -133,7 +132,7 @@ PROCEDURE DataLoader.__init__(
     COPY the manifest-ordered genuine IDs into immutable canonical_sample_ids.
     STORE canonical_order_hash and the supplied component_context.loader_role.
     Bind the explicit sampler random stream only for a training-role loader with training_mode enabled.
-    Evaluation loaders consume no random stream and cannot call shuffle.
+    Evaluation loaders use deterministic sequential sample order.
     IF original_size = 0:
         padded_size <- 0 and num_batch <- 0.
         RETAIN typed empty streams and return a valid empty iterator.
@@ -157,7 +156,7 @@ PROCEDURE DataLoader.__init__(
     END IF
     IF traffic_assignment OR explicit path-output request is enabled:
         REQUIRE candidate paths, feasibility information and incidence references.
-        VERIFY sparse payload metadata does not mix station and compressed slots.
+        VERIFY sparse payload metadata distinguishes station indices and compressed slots.
     END IF
     CHECK every decoder covariate availability time against forecast_origin.
     REGISTER optional tensors only after their dependency checks pass.
@@ -173,7 +172,7 @@ PROCEDURE DataLoader.__init__(
         APPEND the last sample ID to padding slots.
         APPEND FALSE to valid_mask for every padding slot.
     ELSE:
-        RETAIN the final short batch rather than dropping real samples.
+        RETAIN the final short batch.
     END IF
     padded_size <- stored number of samples.
     num_batch <- CEILING(padded_size / batch_size).
@@ -189,7 +188,7 @@ PROCEDURE DataLoader.__len__()
     PARAMETERS None.
     OUTPUT number of stored batches, including any marked padding rows.
     RETURN CEILING(stored sample count / batch_size).
-    An empty loader returns zero, never a fabricated all-padding batch.
+    An empty loader returns zero batches.
 END PROCEDURE
 
 PROCEDURE DataLoader.shuffle()
@@ -215,7 +214,7 @@ PROCEDURE DataLoader.shuffle()
     These operations cover every registered sample-indexed stream exactly once.
     Keep scalar/shared manifest fields unchanged; reject any unclassified sample-axis field.
     The chunked and ragged procedures below implement the same gather for those storage types,
-        rather than applying a second permutation to streams already gathered in memory.
+        while leaving already gathered in-memory streams in their aligned order.
     FOR EACH dense stream selected for memory-mapped reordering:
         CREATE a uniquely owned temporary location inside the configured scratch root.
         CALL _apply_permutation_in_chunks_memmap with the same permutation.
@@ -255,7 +254,7 @@ PROCEDURE DataLoader._apply_permutation_in_chunks_memmap(
     ON failure:
         CLOSE only handles opened here.
         REMOVE only the partially written owned file after verifying its path.
-        PROPAGATE the failure rather than returning partially shuffled samples.
+        PROPAGATE the failure.
 END PROCEDURE
 
 PROCEDURE DataLoader._get_batch(idx,row_order=ABSENT)
@@ -272,7 +271,7 @@ PROCEDURE DataLoader._get_batch(idx,row_order=ABSENT)
     INCLUDE station_order_id, RDS_id, residual_shares_id and transform_id.
     SET fitted_ids to a record of those same artifact identifiers and any auxiliary encoder IDs.
     INCLUDE availability_manifest gathered with selected_rows.
-    Every optional sample-indexed INCLUDE below uses that same gather, never a fresh contiguous slice.
+    Every optional sample-indexed INCLUDE below uses the same gather indices.
     IF history_distribution:
         INCLUDE unfinished_raw, allocation_day, allocation_week and allocation_month.
         INCLUDE allocation_*_count when requested for diagnostics or physical conservation checks.
@@ -297,7 +296,7 @@ PROCEDURE DataLoader._get_batch(idx,row_order=ABSENT)
     KEEP its raw/transform status, station layout and available-at metadata attached.
     INCLUDE target_observation_mask when labels are present, distinct from valid_mask[B].
     REQUIRE no enabled field has fewer rows than stop-start.
-    RETURN batch mapping; never silently fabricate absent future knowledge.
+    RETURN the batch mapping with the supplied future knowledge.
 END PROCEDURE
 
 PROCEDURE DataLoader.__iter__()
@@ -344,10 +343,10 @@ PROCEDURE StandardScaler_Torch.__init__(mean, std, device, transform_manifest)
     INPUT mean, std, transform_manifest.
     PARAMETERS device.
     OUTPUT tensor scaler with immutable statistics on the selected device.
-    Here input std is the recorded raw training standard deviation, not a transformed data array.
+    Input std is the recorded training standard deviation.
     REQUIRE finite statistics and transform_manifest with axes,zero-variance policy and transform_id.
     CONVERT persisted statistics to the model's numeric dtype and requested device.
-    VERIFY std broadcasts to the intended OD dimensions, not accidentally to stations.
+    VERIFY std broadcasts along the recorded OD axes.
     REPLACE zero scales only according to the recorded normalization policy.
     KEEP the original statistic values in the transform manifest.
     STORE raw_std separately; set scale to the manifest-consistent effective denominator.
@@ -403,7 +402,7 @@ PROCEDURE StandardScaler.transform(data)
     OUTPUT normalized numeric array.
     VALIDATE axes against the transform contract.
     RETURN (data - mean) / scale.
-    Preserve missing-value indicators rather than converting missing data to zeros.
+    Preserve missing-value indicators.
 END PROCEDURE
 
 PROCEDURE StandardScaler.inverse_transform(data)
@@ -419,7 +418,7 @@ PROCEDURE config_logging(log_dir, log_filename, level)
     PARAMETERS level.
     OUTPUT configured logging handlers.
     RESOLVE and create the declared run directory if absent.
-    FAIL on an inaccessible directory rather than suppressing every filesystem error.
+    FAIL on an inaccessible directory and report the filesystem error.
     CONSTRUCT a file handler under that directory.
     FORMAT file records as time, logger name, severity and message.
     CONSTRUCT a console handler with time, severity and message.
@@ -453,7 +452,7 @@ PROCEDURE load_dataset(dataset_dir, batch_size, test_batch_size, scaler_axis, op
     INPUT dataset_dir, scaler, frequency_scaler.
     PARAMETERS batch_size, test_batch_size, scaler_axis, options, fit_scaler, phases, component_context.
     OUTPUT DatasetBundle with loaders, frozen scalers, maps and exact target records.
-    REQUIRE a dataset manifest, not assumptions encoded only in old filenames.
+    REQUIRE the dataset manifest.
     REQUIRE fit_scaler is explicitly true for training preparation or false for restoration.
     REQUIRE phases names only requested available splits; evaluation may request only val or test.
     REQUIRE options identifies normalization, missing-history, padding and worker policies.
@@ -478,7 +477,7 @@ PROCEDURE load_dataset(dataset_dir, batch_size, test_batch_size, scaler_axis, op
         STORE x_phase <- finished observations, not complete historical actual OD.
         STORE y_phase <- future actual demand labels.
         PRESERVE exact raw passenger-count targets by sample ID and target timestamp before normalization.
-        Keep these immutable counts for evaluation and zero-flow membership; do not reconstruct zeros by rounded inverse transforms.
+        Use immutable observed counts for evaluation and zero-flow membership.
         STORE xtime_phase, ytime_phase, cutoff and sample identities.
         SET expected_counts[phase] to the number of unique genuine sample IDs before padding.
         STORE split_sample_order[phase] from the persisted manifest order.
@@ -541,7 +540,7 @@ PROCEDURE load_dataset(dataset_dir, batch_size, test_batch_size, scaler_axis, op
         END IF
         Verify referenced auxiliary windows, target offsets, task-specific graph/scaler/checkpoint IDs,
             input feature order and availability against that sample's forecast origin.
-        Reject an incomplete auxiliary context instead of fabricating a window from the current feature row.
+        Reject an incomplete auxiliary context.
         REJECT future actual OD or future unannounced service observations in inputs.
     END FOR
     IF fit_scaler is true:
@@ -560,7 +559,7 @@ PROCEDURE load_dataset(dataset_dir, batch_size, test_batch_size, scaler_axis, op
         VERIFY scaler.transform_id equals component_context.checkpoint_transform_id.
         Reuse the saved statistics for every requested split.
     END IF
-    The exact original normalization source and axes remain unresolved until a run declares them.
+    The run configuration specifies the normalization source and axes.
     FOR phase IN phases:
         Bind x_phase,y_phase and allocation streams to their fields in data[phase].
         TRANSFORM x_phase and, when labels are present, y_phase with the stored OD transform.
@@ -592,7 +591,7 @@ PROCEDURE load_dataset(dataset_dir, batch_size, test_batch_size, scaler_axis, op
         STORE encoder_frequency as an explicitly raw-scale view of raw_frequency.
         SET encoder_scale='raw' and frequency_transform_id to the declared identity-transform identifier.
     ELSE:
-        KEEP service fields and frequency_scaler ABSENT; do not fabricate zero service tensors.
+        KEEP service fields and frequency_scaler ABSENT.
     END IF
     IF service_required:
         BUILD time-indexed ServiceRecords carrying both views, tags and availability timestamps.
@@ -603,7 +602,7 @@ PROCEDURE load_dataset(dataset_dir, batch_size, test_batch_size, scaler_axis, op
     FOR phase IN phases:
         BUILD targets_by_id[phase] as immutable records containing normalized targets,
             raw_target_count, observation masks and timestamps, joined by unique ID.
-        These records cannot alias mutable loader storage that will later be permuted.
+        Keep these records independent of mutable loader storage.
         phase_batch_size <- batch_size if phase=train, otherwise evaluation_batch_size.
         phase_shuffle <- phase=train AND options.training_mode.
         loaders[phase] <- load_dataset.create_dataloader(phase,data,phase_batch_size,phase_shuffle,options.num_workers).
@@ -611,7 +610,7 @@ PROCEDURE load_dataset(dataset_dir, batch_size, test_batch_size, scaler_axis, op
         EXPOSE normalized x/y arrays through legacy x_phase/y_phase keys when present.
     END FOR
     PASS the same explicit component context into all three loaders.
-    USE environment-configured worker counts rather than a fixed 48-worker default.
+    USE environment-configured worker counts.
     bundle.frozen_train_scaler <- scaler; data['scaler'] <- scaler.
     bundle.frequency_scaler <- frequency_scaler if active, otherwise ABSENT.
     bundle.arrays <- data; bundle.loaders <- loaders.
@@ -627,7 +626,7 @@ PROCEDURE load_dataset.create_dataloader(phase, data, batch_size, shuffle, num_w
     data_dict <- COPY(data[phase]) with the requested phase's field schema.
     INCLUDE core OD tensors and times.
     INCLUDE allocation_day/week/month, count-scale diagnostics and raw unfinished counts when enabled.
-    INCLUDE the allocation representation and scale tags so downstream code cannot allocate twice.
+    INCLUDE the allocation representation and scale tags for direct consumption by the model.
     INCLUDE explanatory, frequency and sparse assignment streams when enabled.
     INCLUDE independent decoder knowledge and per-sample availability records.
     INCLUDE sample IDs, valid masks and fitted-artifact identities.
@@ -668,7 +667,6 @@ PROCEDURE load_pickle(pickle_file)
     VALIDATE the loaded top-level type and required schema fields.
     ON any other error, report artifact path and cause without dumping private contents.
     RETURN the validated object.
-    A future implementation may use a non-executable storage format instead.
 END PROCEDURE
 
 PROCEDURE move_to_device(item, device)
@@ -724,7 +722,7 @@ PROCEDURE collate_wrapper(
     PARAMETERS num_nodes, seq_len, horizon, device, return_y, component_context.
     OUTPUT BatchBundle with aligned historical steps, future knowledge and optional labels.
     REQUIRE x_od layout [B,H,N,K] with N = num_nodes.
-    BIND the same normalized independent flags from component_context; legacy aliases cannot override them.
+    BIND the normalized independent flags from component_context and check legacy aliases for agreement.
     REQUIRE seq_len <= H and horizon matches the requested future-step contract.
     REQUIRE K = retained count + 1 in the supplied RDS manifest.
     IF labels are supplied, REQUIRE y_od layout [B,F,N,K] and horizon <= F.
@@ -732,7 +730,7 @@ PROCEDURE collate_wrapper(
     The SLICE/transpose operations below apply only to present active fields, or explicit diagnostic fields.
     REQUIRE all fields needed by an active component; omit absent disabled fields without zero stand-ins.
     History allocations, auxiliary contexts, generic inputs, ServiceRecords and path payloads
-        each follow their own dependency predicate; presence of one never requires all the others.
+        each follow their own dependency predicate.
     FOR each sample b, resolve exactly seq_len historical indices from xtime and the forecast cutoff.
     REQUIRE those timestamps match the declared window and occur before forecast_origin[b].
     Resolve exactly horizon future indices from ytime, starting at the declared first forecast interval.
@@ -750,7 +748,7 @@ PROCEDURE collate_wrapper(
     Slice generic_exogenous_inputs only on its declared sample/main-time axes, preserving its [N,F_exogenous] layout.
     Preserve raw/transform status and schema tags; apply the contract's input transform once.
     SLICE ServiceRecord.raw_frequency,encoder_frequency,structural_support,known_status and availability together.
-    PRESERVE scalar scale/transform/line-order tags; do not index those tags as sample arrays.
+    PRESERVE scalar scale/transform/line-order tags across sample indexing.
     APPLY per-sample index selections to ragged payloads without densifying their internal path axes.
     REPLACE local H with seq_len and local F with horizon only after all aligned slices succeed.
     REQUIRE every resulting historical stream has exactly H steps and every future stream exactly F steps.
@@ -760,7 +758,7 @@ PROCEDURE collate_wrapper(
     REPRESENT future dense fields as [F,B,N,...] independently.
     IF history_distribution:
         RESOLVE any legacy history/yesterday/monthly_history names through the canonical alias map.
-        REJECT conflicting canonical and legacy inputs rather than silently choosing one.
+        REJECT conflicting canonical and legacy inputs.
         REQUIRE representation_kind='unfinished_allocation' and allocation_scale='normalized'.
         REQUIRE day, week and month allocation tensors with the same transform_id as x_od.
         TRANSPOSE each historical stream consistently with x_od.

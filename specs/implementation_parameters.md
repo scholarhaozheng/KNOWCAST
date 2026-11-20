@@ -1,6 +1,6 @@
 # Implementation parameters
 
-The algorithms accept the choices below through configuration. [Paper settings](paper_settings.yaml) records values and ranges stated in the article; this table names the remaining inputs without repeating them in each procedure.
+The algorithms take the choices below from configuration. [Paper settings](paper_settings.yaml) records values and ranges stated in the article.
 
 | Area | Parameters / artifacts | Consumer |
 | --- | --- | --- |
@@ -27,6 +27,6 @@ Case 3b uses `encoder_spec={input_dim,widths,activations,dropout,feature_schema,
 
 For each path-to-section contribution, the kernel maps hop distance to a Gaussian delay mean and spread. Receiving weights integrate that distribution over the receiving interval, with optional quadrature over the entry interval. The mass ledger records received mass, discarded negative-delay mass and mass outside the receiving grid.
 
-Select `full_gaussian`, `causal_discard` or `causal_renormalized` explicitly. A zero spread gives a deterministic delay. Required entry support and its tail tolerance determine coverage at grid boundaries; a missing earlier cohort is recorded as incomplete coverage.
+Select one tail policy: `full_gaussian`, `causal_discard` or `causal_renormalized`. A zero spread gives a deterministic delay. Required entry support and its tail tolerance determine coverage at grid boundaries; a missing earlier cohort is recorded as incomplete coverage.
 
 With uniform arrivals, section passengers over an interval divided by the number of trains gives passengers per train. Under constant headway `h` and interval duration `Delta`, this is `volume*h/Delta`. Calibrated alternatives supply their conversion function and parameters.

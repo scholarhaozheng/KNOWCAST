@@ -1,4 +1,5 @@
 MODULE RecurrentGCN_for_trip_generation
+FORMAT Pseudocode.
 PURPOSE Recurrent generation estimator used independently of the main OD learner.
 PAPER Sections 4.3.1-4.3.2; Equation (14).
 
@@ -12,7 +13,7 @@ CLASS RecurrentGCN
     STATE output_projection: trainable mapping from hidden states to generation outputs.
     STATE activation_policy: explicit option, legacy SELU when selected.
     STATE output_nonnegativity_policy: explicit implementation choice.
-    STATE sequence_state: reset or supplied at sequence boundaries, never global across shuffled samples.
+    STATE sequence_state: reset or supplied at each independent sequence boundary.
     CONTRACT input x has shape [batch,N,F] or a declared single-sample equivalent.
     CONTRACT previous hidden state has shape [batch,N,H].
     CONTRACT output has shape [batch,N,output_dim].

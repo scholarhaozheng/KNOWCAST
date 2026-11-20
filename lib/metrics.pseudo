@@ -1,15 +1,15 @@
 MODULE lib.metrics
-STATUS non-executable metric specification preserving the four original entry points
+FORMAT Pseudocode.
 PAPER §5.1.3, Eqs.34–37; compute a metric per horizon, then average horizons
 
 SHARED CONTRACT
     Predictions and labels have identical shape and passenger-flow units.
     Validity masks exclude loader padding and declared unavailable observations.
-    A true zero passenger count is valid and must not be removed from MAE/RMSE.
+    A true zero passenger count is valid for MAE and RMSE.
     Nonfinite values are errors unless an explicitly declared mask accounts for them.
-    No implicit replacement of invalid forecasts with perfect zero errors is allowed.
-    These four original names are retained; the old MAPE name denotes WMAPE.
-    Masked in a function name does not prescribe a demand threshold.
+    Invalid forecasts follow the error/mask policy.
+    The masked_mape_np entry point computes WMAPE.
+    Validity masks and demand thresholds are separate inputs.
 
 PROCEDURE VALID_ELEMENTS(preds, labels, valid_mask)
     INPUT preds, labels, valid_mask.

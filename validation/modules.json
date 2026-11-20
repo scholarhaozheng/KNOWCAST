@@ -1,0 +1,1610 @@
+[
+  {
+    "path": "bayes_opt.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "plot_bayes_search"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "objective"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "MAKE_VALIDATION_CALLBACK"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "STUDY_ENTRY"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "FULL_TRAIN_SELECTED_CONFIGURATION"
+      }
+    ]
+  },
+  {
+    "path": "config.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "parse_arguments"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "load_configuration"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "validate_configuration"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "expose_args"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "RESOLVE_COMPONENT_CONTEXT"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ASSESS_ARTIFACT_READINESS"
+      }
+    ]
+  },
+  {
+    "path": "dmn_knw_gnrtr/Generating_Metro_Related_data.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "get_same_lines"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "dijkstra"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "yen_ksp"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "yen_ksp.contains_subsequence"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "find_routes"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "print_route_info"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Generating_Metro_Related_data"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Generating_Metro_Related_data.get_input_or_default"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Generating_Metro_Related_data.get_valid_station_input"
+      }
+    ]
+  },
+  {
+    "path": "dmn_knw_gnrtr/PYGT_signal_generation_one_hot.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "PYGT_signal_generation"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "build_generation_windows"
+      }
+    ]
+  },
+  {
+    "path": "dmn_knw_gnrtr/RecurrentGCN_for_trip_generation.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "RecurrentGCN"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "RecurrentGCN.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "RecurrentGCN.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "forecast_sequence"
+      }
+    ]
+  },
+  {
+    "path": "dmn_knw_gnrtr/fit_trip_distribution_model.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "impedance_function"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "compute_flow"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "objective_function"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "fit_trip_distribution_model"
+      }
+    ]
+  },
+  {
+    "path": "dmn_knw_gnrtr/generating_OD_section_pssblty_sparse_array_0209.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "batch_processing"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "processing_Time_DepartFreDic_item"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "generating_OD_section_pssblty_sparse_array_0209"
+      }
+    ]
+  },
+  {
+    "path": "dmn_knw_gnrtr/generating_array_OD.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "generate_OD_DO_array"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "generate_OD_DO_array.process_OD_array_of_each_timestamp"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "save_to_pickle"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "print_array_info"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "generate_T_N_D_ODs"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "fit_training_destination_mapping"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "time_in_interval"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "build_sample_plan"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "generating_trip_generation_data_and_OD_dict"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "build_cutoff_observations"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "process_data_D"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Connect_to_SQL"
+      }
+    ]
+  },
+  {
+    "path": "dmn_knw_gnrtr/generating_domain_knowledge_with_timestamp.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "generating_traffic_assignment_knowledge_with_timestamp"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "build_auxiliary_covariate_context"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "select_available_snapshot"
+      }
+    ]
+  },
+  {
+    "path": "dmn_knw_gnrtr/processing_sql.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "main"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "extract_filtered_data"
+      }
+    ]
+  },
+  {
+    "path": "dmn_knw_gnrtr/run_PYGT_0917.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "run_PYGT"
+      }
+    ]
+  },
+  {
+    "path": "dmn_knw_gnrtr/test_PYGT_0917.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "test_PYGT"
+      }
+    ]
+  },
+  {
+    "path": "dmn_knw_gnrtr/trip_generation_info_generating.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "clean_numeric"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "load_automated_map"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "load_station_data_from_csv"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "get_population_from_raster"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "generate_station_level_socio_demographics"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "main"
+      }
+    ]
+  },
+  {
+    "path": "evaluate_button.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "read_cfg_file"
+      },
+      {
+        "kind": "CLASS",
+        "name": "StepLR2"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StepLR2.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StepLR2.get_lr"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "init_weights"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "toDevice"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "main"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "LOAD_CHECKPOINT_WITH_MANIFEST"
+      }
+    ]
+  },
+  {
+    "path": "experiments/ablation_and_sensitivity.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "define_ablation_cases"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "materialize_case_dependencies"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "build_learner_adapter"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "build_generic_exogenous_adapter"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "register_external_baselines"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "run_controlled_comparison"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "compare_early_training_trajectories"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "benchmark_runtime"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "evaluate_window_sensitivity"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "evaluate_retention_sensitivity"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "export_experiment_manifest"
+      }
+    ]
+  },
+  {
+    "path": "experiments/operational_load_assessment.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "build_operational_forecast_view"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "define_operational_protocol"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "validate_forecast_assignment_inputs"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "construct_retained_assignment"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "summarize_spatial_assignment"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "derive_train_level_observations"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "compensate_nonretained_volume"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "assemble_entry_cohort_series"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "construct_temporal_dispersion"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "interval_kernel_weights"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "gaussian_interval_mass"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "convert_section_volume_to_train_load"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "align_operational_snapshots"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "compute_three_level_error_trace"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "wmape_percent"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "pearson_correlation"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "export_operational_assessment"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "operational_assessment_main"
+      }
+    ]
+  },
+  {
+    "path": "generating_domain_knowledge_no_DO_clean.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "main"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "main.write_cfg_file"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "main.save_to_pkl"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "prepare_generic_exogenous_inputs"
+      }
+    ]
+  },
+  {
+    "path": "lib/__init__.pseudo",
+    "declarations": []
+  },
+  {
+    "path": "lib/metrics.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "VALID_ELEMENTS"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "masked_mse_np"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "masked_rmse_np"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "masked_mae_np"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "masked_mape_np"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "segmented_smape"
+      }
+    ]
+  },
+  {
+    "path": "lib/utils_CUROP.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "read_cfg_file"
+      },
+      {
+        "kind": "CLASS",
+        "name": "DataLoader"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "DataLoader.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "DataLoader.__len__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "DataLoader.shuffle"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "DataLoader._apply_permutation_in_chunks_memmap"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "DataLoader._get_batch"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "DataLoader.__iter__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "DataLoader.get_iterator"
+      },
+      {
+        "kind": "CLASS",
+        "name": "StandardScaler_Torch"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StandardScaler_Torch.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StandardScaler_Torch.transform"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StandardScaler_Torch.inverse_transform"
+      },
+      {
+        "kind": "CLASS",
+        "name": "StandardScaler"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StandardScaler.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StandardScaler.transform"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StandardScaler.inverse_transform"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "config_logging"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "get_logger"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "load_dataset"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "load_dataset.create_dataloader"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "load_graph_data"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "load_pickle"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "move_to_device"
+      },
+      {
+        "kind": "CLASS",
+        "name": "SimpleBatch"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "SimpleBatch.to"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "collate_wrapper"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "COLLATE_BATCH_RECORD"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "BUILD_GRAPH_BUNDLE"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "NORMALIZE_AUXILIARY_CONTEXT"
+      }
+    ]
+  },
+  {
+    "path": "metro_components/Line.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "Line"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Line.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Line.add_station"
+      }
+    ]
+  },
+  {
+    "path": "metro_components/LineManager.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "LineManager"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "LineManager.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "LineManager.add_line"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "LineManager.print_line_info"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "LineManager.print_all_info"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "LineManager.print_stops"
+      }
+    ]
+  },
+  {
+    "path": "metro_components/MetroRequester_SuZhou.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "haversine_distance"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "request_suzhou_metro_data"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "network_loader_example"
+      }
+    ]
+  },
+  {
+    "path": "metro_components/MetroUtil.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "get_line_number"
+      }
+    ]
+  },
+  {
+    "path": "metro_components/OD.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "OD"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "OD.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "OD.__hash__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "OD.__eq__"
+      }
+    ]
+  },
+  {
+    "path": "metro_components/Path.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "Path"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Path.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Path.__lt__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Path.add_path"
+      }
+    ]
+  },
+  {
+    "path": "metro_components/Route.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "Route"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Route.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Route.__setattr__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Route.construct_route"
+      }
+    ]
+  },
+  {
+    "path": "metro_components/Section.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "Section"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Section.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Section.__hash__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Section.__eq__"
+      }
+    ]
+  },
+  {
+    "path": "metro_components/Station.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "Station"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Station.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Station.add_line"
+      }
+    ]
+  },
+  {
+    "path": "metro_components/StationManager.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "StationManager"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StationManager.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StationManager.add_station"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StationManager.print_station_info"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StationManager.print_all_info"
+      }
+    ]
+  },
+  {
+    "path": "metro_data_convertor/Find_project_root.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "Find_project_root"
+      }
+    ]
+  },
+  {
+    "path": "metro_data_convertor/Generating_logit_probabilities.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "calculate_logit_probabilities"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Generating_logit_probabilities"
+      }
+    ]
+  },
+  {
+    "path": "metro_data_convertor/Get_Time_DepartFreDic.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "get_station_range"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "process_operating_stations"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "parse_headway_seconds"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Get_Time_DepartFreDic"
+      }
+    ]
+  },
+  {
+    "path": "metro_data_convertor/Process_Time_DepartFreDic.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "Process_Time_DepartFreDic"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Process_Time_DepartFreDic.process_timestamp"
+      }
+    ]
+  },
+  {
+    "path": "metro_data_convertor/Reprocessing_OD_visiting_prob.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "Reprocessing_OD_visiting_prob"
+      }
+    ]
+  },
+  {
+    "path": "metro_data_convertor/convert_objects_to_dict.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "convert_objects_to_dict"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "convert_node"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "load_network_records"
+      }
+    ]
+  },
+  {
+    "path": "models/GATRUCell.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "zoneout"
+      },
+      {
+        "kind": "CLASS",
+        "name": "KStepRGCN"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "KStepRGCN.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "KStepRGCN.forward"
+      },
+      {
+        "kind": "CLASS",
+        "name": "GATRUCell"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATRUCell.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATRUCell.reset_parameters"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATRUCell.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATRUCell.verify_gate_and_gradient_contract"
+      }
+    ]
+  },
+  {
+    "path": "models/GGRUCell.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "zoneout"
+      },
+      {
+        "kind": "CLASS",
+        "name": "KStepRGCN"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "KStepRGCN.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "KStepRGCN.forward"
+      },
+      {
+        "kind": "CLASS",
+        "name": "GGRUCell"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GGRUCell.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GGRUCell.reset_parameters"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GGRUCell.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GGRUCell.state_contract"
+      }
+    ]
+  },
+  {
+    "path": "models/Net_0207.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "UtilityLayer"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "UtilityLayer.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "UtilityLayer.forward"
+      },
+      {
+        "kind": "CLASS",
+        "name": "LogitLayer"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "LogitLayer.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "LogitLayer.forward"
+      },
+      {
+        "kind": "CLASS",
+        "name": "SimpleAutoencoder"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "SimpleAutoencoder.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "SimpleAutoencoder.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "SimpleAutoencoder.encode"
+      },
+      {
+        "kind": "CLASS",
+        "name": "ImpedanceLayer"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ImpedanceLayer.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ImpedanceLayer.forward"
+      },
+      {
+        "kind": "CLASS",
+        "name": "GravityModelNetwork"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GravityModelNetwork.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GravityModelNetwork.forward"
+      },
+      {
+        "kind": "CLASS",
+        "name": "Net_0207"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.inverse_sigmoid_scheduler_sampling"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.encoder_od_do"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.scheduled_sampling"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.decoder_od_do"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.forward.load_from_pkl"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.build_knowledge_for_step"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.assemble_node_features"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.legacy_cp_representation"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.assign_prediction"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.apply_flow_output_policy"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.prepare_autoencoders"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.materialize_encoder_input"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.transform_OD"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.inverse_transform_OD"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.checkpoint_contract"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.legacy_only_od_adapter"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.set_execution_mode"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.slice_example"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.prepare_encoder_steps"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.prepare_unfinished_allocations"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.prepare_decoder_steps"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.estimate_generation"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.compress_distribution"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.encoder_payload"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.build_path_context"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.evaluate_route"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.missing_path_embedding"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.build_service_features"
+      },
+      {
+        "kind": "CLASS",
+        "name": "ConfiguredMLPEncoder"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ConfiguredMLPEncoder.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ConfiguredMLPEncoder.transform_input"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ConfiguredMLPEncoder.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ConfiguredMLPEncoder.encode"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "build_generic_encoder"
+      },
+      {
+        "kind": "CLASS",
+        "name": "ConfiguredAutoencoder"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ConfiguredAutoencoder.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ConfiguredAutoencoder.encode"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ConfiguredAutoencoder.forward"
+      },
+      {
+        "kind": "CLASS",
+        "name": "FeatureEncoderView"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "FeatureEncoderView.encode"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "make_feature_autoencoder"
+      },
+      {
+        "kind": "CLASS",
+        "name": "OriginAdapter"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "build_origin_adapter"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "OriginAdapter.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.knowledge_from_example"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "transform_and_vectorize"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "Net_0207.normalize_knowledge_records"
+      }
+    ]
+  },
+  {
+    "path": "models/OD_Net_att.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "ODNet_att"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ODNet_att.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "make_recurrent_cell"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ODNet_att.positional_encoding"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ODNet_att.encoder_first_layer"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ODNet_att._encoder_first_layer_v1"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ODNet_att._encoder_first_layer_v2"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ODNet_att.encoder_second_layer"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ODNet_att.decoder_first_layer"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ODNet_att.decoder_second_layer"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ODNet_att.encoder_first_layer_paper"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ODNet_att.fuse_paper_states"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ODNet_att.apply_readout"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ODNet_att.check_branch_connectivity"
+      },
+      {
+        "kind": "CLASS",
+        "name": "ConfiguredGatingLayer"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ConfiguredGatingLayer.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ConfiguredGatingLayer.position_values"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ConfiguredGatingLayer.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ConfiguredGatingLayer.attend"
+      }
+    ]
+  },
+  {
+    "path": "models/__init__.pseudo",
+    "declarations": []
+  },
+  {
+    "path": "models/gat.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "GATConv"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATConv.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATConv.reset_parameters"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATConv.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATConv.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATConv.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATConv.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "canonical_edges"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATConv.edge_update"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATConv.message"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATConv.__repr__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATConv.self_loop_attribute"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "GATConv.verify_sparse_dense_equivalence"
+      }
+    ]
+  },
+  {
+    "path": "models/rgcn.pseudo",
+    "declarations": [
+      {
+        "kind": "CLASS",
+        "name": "RGCNConv"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "RGCNConv.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "RGCNConv.reset_parameters"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "RGCNConv.forward"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "RGCNConv.message"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "RGCNConv.update"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "RGCNConv.__repr__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "RGCNConv.validate_checkpoint"
+      }
+    ]
+  },
+  {
+    "path": "train_evaluate_functions.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "run_model"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "evaluate"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "_get_log_dir"
+      },
+      {
+        "kind": "CLASS",
+        "name": "StepLR2"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StepLR2.__init__"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "StepLR2.get_lr"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "BUILD_FLOW_SEGMENTS"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "SEGMENTED_EVALUATION"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "ASSIGNMENT_SUMMARIES"
+      }
+    ]
+  },
+  {
+    "path": "train_save_history.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "read_cfg_file"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "init_weights"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "compute_epoch_od_errors"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "main"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "READ_TRAINING_RESUME_BUNDLE"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "PREPARE_TRAINING_DATASET"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "COLLATE_TRAINING_BATCH"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "EVALUATE_TRAINING_SPLIT"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "BUILD_OBJECTIVE_CONTEXT"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "COMPUTE_TRAINING_LOSS"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "DESTINATION_TOTALS"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "DECLARED_MINIBATCH_ESTIMATOR"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "EPOCH_FORMULA_INDEX"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "BUILD_GRAPH_FOR_TRAINING"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "BUILD_OPTIMIZER"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "BUILD_DECLARED_SCHEDULER"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "COMPARE_VALIDATION"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "SAVE_CHECKPOINT_BUNDLE"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "EXPORT_HISTORY_AND_DIAGNOSTICS"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "SELECT_OD_DIAGNOSTICS"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "POSTHOC_TEST_CURVES"
+      }
+    ]
+  },
+  {
+    "path": "visualization_tools/plot_graph.pseudo",
+    "declarations": [
+      {
+        "kind": "PROCEDURE",
+        "name": "plot_step_points_from_excel"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "plot_metric_pair"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "plot_training_curves"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "plot_od_losses"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "plot_od_time_series"
+      },
+      {
+        "kind": "PROCEDURE",
+        "name": "plot_od_time_series_first_step"
+      }
+    ]
+  }
+]

@@ -1,4 +1,4 @@
-"""Independent hand examples for the November 20 review; not a pseudocode interpreter."""
+"""Numerical examples for path assignment, line-specific loads, and service coverage."""
 from __future__ import annotations
 import argparse
 import json
@@ -12,7 +12,7 @@ def close(actual, expected):
 
 def run_checks():
     checks = []
-    # Stable path IDs are neither array offsets nor a nested OD mapping.
+    # Gather probabilities by OD pair and stable path ID.
     od = ('A', 'C')
     feasible = ['via-B', 'direct']
     probabilities = {(od, 'direct'): 0.25, (od, 'via-B'): 0.75}
@@ -24,7 +24,7 @@ def run_checks():
                    'feasible_order':feasible, 'gathered_probabilities':rho,
                    'actual_path_flow':flows, 'expected_path_flow':[6,2]})
 
-    # A known empty feasible set records unassigned demand rather than inventing a route.
+    # Record demand with an empty feasible set as unassigned.
     demand, candidates = 7.0, []
     assigned = 0.0
     unassigned = demand if not candidates else 0.0
@@ -32,9 +32,9 @@ def run_checks():
     assert unassigned > 0
     checks.append({'name':'empty_path_set_keeps_unassigned_mass', 'status':'passed',
                    'demand':demand, 'assigned':assigned, 'unassigned':unassigned,
-                   'coverage':'incomplete; not verified zero section flow'})
+                   'coverage':'unassigned_demand'})
 
-    # Shared physical infrastructure must retain line identity for train-load conversion.
+    # Convert passenger volume to load separately for each line.
     interval_hours = 0.25
     volumes = {'line_1':120.0, 'line_2':60.0}
     frequencies = {'line_1':12.0, 'line_2':6.0}
@@ -45,9 +45,9 @@ def run_checks():
     checks.append({'name':'line_specific_uniform_arrival_conversion', 'status':'passed',
                    'expected_loads':{'line_1':40.0,'line_2':40.0}, 'actual_loads':loads,
                    'incorrect_pooled_line_1_load':incorrectly_pooled_line_1,
-                   'scope':'declared uniform-arrival reconstruction example; paper conversion unspecified'})
+                   'arrival_assumption':'uniform arrivals within each interval'})
 
-    # No division is reached when service is zero, for either zero or positive demand.
+    # Classify zero-service intervals before computing load.
     rows = []
     for volume, service in [(0.0,0.0),(5.0,0.0),(5.0,2.0)]:
         if service == 0:
@@ -58,10 +58,8 @@ def run_checks():
         rows.append({'volume':volume,'service':service,'status':status,'load':load})
     assert [r['load'] for r in rows] == [None,None,2.5]
     checks.append({'name':'zero_service_guard_before_division', 'status':'passed','cases':rows})
-    return {'artifact_kind':'independent_contract_hand_examples', 'audit_date':'2026-11-20',
-            'checks_passed':len(checks), 'executed_pseudocode':False,
-            'executed_original_model':False, 'trained_model':False,
-            'reproduced_paper_results':False, 'dependencies':['Python standard library'],
+    return {'artifact_kind':'assignment_formula_examples',
+            'checks_passed':len(checks), 'dependencies':['Python standard library'],
             'checks':checks}
 
 

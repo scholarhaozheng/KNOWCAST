@@ -1,8 +1,4 @@
-"""Independent standard-library mathematical oracles for the model specification.
-
-This script does not execute the .pseudo files, load original models, import Torch,
-train KNOWCAST, or reproduce paper results. Expected values use small hand examples.
-"""
+"""Small numerical examples for model equations and parameter-registration checks."""
 
 from __future__ import annotations
 
@@ -32,7 +28,7 @@ def masked_softmax(utilities, feasible):
         raise ValueError("Utility and mask lengths differ.")
     valid = [i for i, keep in enumerate(feasible) if keep]
     if not valid:
-        raise ValueError("Empty feasible set: this oracle explicitly rejects it.")
+        raise ValueError("Empty feasible set.")
     maximum = max(utilities[i] for i in valid)
     weights = {i: math.exp(utilities[i] - maximum) for i in valid}
     total = sum(weights.values())
@@ -51,7 +47,7 @@ def stable_teacher_probability(step, k):
 
 def ipf(production, attraction, cost, zeta, tolerance=1e-12, maximum_iterations=10000):
     if zeta <= 0 or any(value <= 0 for value in production + attraction):
-        raise ValueError("This small oracle handles positive feasible margins only.")
+        raise ValueError("IPF requires positive feasible margins.")
     assert_close(sum(production), sum(attraction))
     kernel = [[math.exp(-zeta * value) for value in row] for row in cost]
     origin = [1.0] * len(production)
@@ -74,7 +70,7 @@ def ipf(production, attraction, cost, zeta, tolerance=1e-12, maximum_iterations=
             return {"flow": flow, "kernel": kernel, "origin": origin,
                     "destination": destination, "iterations": iteration,
                     "maximum_margin_error": error}
-    raise ArithmeticError("IPF did not converge within this oracle's explicit limit.")
+    raise ArithmeticError("IPF did not converge within the iteration limit.")
 
 
 def check_gru_equation():
@@ -122,7 +118,7 @@ def check_softmax():
     return {"name": "masked_stable_path_softmax", "status": "passed",
             "utilities": logits, "feasible_mask": mask,
             "expected": expected, "actual": actual,
-            "empty_set_policy": "explicit oracle rejection, not a recovered paper policy",
+            "empty_set_policy": "raise ValueError",
             "empty_set_rejected": empty_rejected}
 
 
@@ -143,7 +139,7 @@ def check_assignment():
         for probability, directed_sections in paths[(origin, destination)]:
             flow = demand * probability
             path_flows.append(flow)
-            for edge in set(directed_sections):  # Binary incidence, not traversal multiplicity.
+            for edge in set(directed_sections):  # Count each directed section once per path.
                 section[edge] = section.get(edge, 0.0) + flow
         assert_close(sum(path_flows), demand)
         per_od[f"{origin}->{destination}"] = path_flows
@@ -159,7 +155,7 @@ def check_assignment():
     total_assigned = sum(sum(values) for values in per_od.values())
     assert_close(total_assigned, 24.0)
     assert_close(sum(row[1] for row in compressed), 96.0)
-    assert (2, 0) not in section  # A reverse edge is not manufactured.
+    assert (2, 0) not in section  # Preserve section direction.
     return {"name": "retained_OD_path_and_directed_section_conservation", "status": "passed",
             "expected_path_flows": expected_paths, "actual_path_flows": per_od,
             "expected_section_flows": expected_sections, "actual_section_flows": actual_sections,
@@ -194,7 +190,7 @@ def check_gravity():
                        "expected_flow": expected_second, **second},
             "stale_first_case_coefficients_on_case_2": old_coefficients_on_new_margins,
             "stale_row_totals": stale_row_totals,
-            "proof_scope": "positive feasible 2x2 examples, not all degenerate/IPF support cases"}
+            "margin_conditions": "positive feasible 2x2 examples"}
 
 
 def check_schedule():
@@ -207,8 +203,8 @@ def check_schedule():
     large = stable_teacher_probability(1_000_000.0, 10.0)
     assert_close(large, 0.0)
     assert cases[0]["actual"] > cases[1]["actual"] > cases[2]["actual"] > large
-    return {"name": "legacy_inverse_sigmoid_schedule_stability", "status": "passed",
-            "profile": "legacy alternative; paper training uses teacher forcing",
+    return {"name": "inverse_sigmoid_schedule_stability", "status": "passed",
+            "profile": "optional scheduled sampling",
             "finite_cases": cases, "large_step": 1_000_000,
             "large_step_expected": 0.0, "large_step_actual": large}
 
@@ -238,7 +234,7 @@ def check_utility_gradient():
     prior_utilities = [sum(a * b for a, b in zip(row, prior)) for row in prior_attributes]
     assert_close(prior_utilities, [-1.2, -1.473, -1.8])
     return {"name": "utility_to_softmax_finite_difference", "status": "passed",
-            "objective": "weighted probability surrogate, not a trained forecasting network",
+            "objective": "weighted sum of path probabilities",
             "beta_at_derivative": beta, "attributes": attributes,
             "downstream_weights": downstream_weights, "expected_objective": 2.0,
             "expected_gradient": expected_gradient, "finite_difference_gradient": measured,
@@ -281,13 +277,9 @@ def main():
     workspace = Path(__file__).resolve().parents[2]
     checks = [check_gru_equation(), check_softmax(), check_assignment(), check_gravity(),
               check_schedule(), check_utility_gradient(), static_registration_evidence(workspace)]
-    result = {"artifact_kind": "independent_formula_reference_checks",
-              "executed_pseudocode": False,
-              "executed_original_model": False,
-              "trained_model": False,
-              "reproduced_paper_results": False,
+    result = {"artifact_kind": "model_formula_examples",
               "dependencies": ["Python standard library"],
-              "numerical_oracles_passed": sum(check["status"] == "passed" for check in checks),
+              "numerical_examples_passed": sum(check["status"] == "passed" for check in checks),
               "static_contract_checks": 1,
               "checks": checks}
     rendered = json.dumps(result, ensure_ascii=False, indent=2)

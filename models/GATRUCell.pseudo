@@ -1,4 +1,5 @@
 MODULE models.GATRUCell
+FORMAT Pseudocode.
 PURPOSE Graph attention followed by a recurrent update.
 PAPER Section 4.8, Eqs. (31)-(33).
 INPUT Node features[V_total,D], directed graph, optional hidden[V_total,h].

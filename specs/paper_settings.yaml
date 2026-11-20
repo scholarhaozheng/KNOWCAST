@@ -1,15 +1,13 @@
-# Paper-derived documentation, NOT an executable training configuration.
-# null means unresolved from the cited paper; it must not become a default.
+# Paper settings and pseudocode parameters.
+# null denotes a caller-supplied implementation setting.
 schema_version: "1.0"
-status: paper_aligned_non_executable_specification
-original_experiment_source_code: false
-reproduction_status: not_reproduced
+document_kind: paper_settings_and_pseudocode_parameters
 source:
   title: "KNOWCAST: Domain-knowledge-integrated deep learning for metro OD forecasting and path flow estimation"
   doi: "10.1016/j.trc.2026.105710"
   local_pdf: "docs/assets/knowcast-paper.pdf"
   page_numbering: "1-based PDF pages (37 pages)"
-  numerical_precision_policy: "Continuous selected values and reported results are reported_rounded, not recovered full-precision experiment parameters."
+  numerical_precision_policy: "Selected values and results retain the numerical precision reported in the paper."
 
 dataset:
   source: "Section 5.1.1, pp. 20-21; Table 2, p. 22"
@@ -27,18 +25,18 @@ dataset:
   dimension_retention_ratio:
     value: 0.23
     status: fixed_paper_reported
-    interpretation: "Matrix-dimension ratio, not fraction of passenger volume retained."
-  retained_destinations_per_origin: null # Exact integer cannot be recovered safely from the rounded ratio.
-  compressed_destination_columns: null # Includes one residual column; do not infer an integer by rounding 154 * 0.23.
+    interpretation: "Fraction of OD target dimensions retained; total passenger volume is preserved."
+  retained_destinations_per_origin: null # Integer destination count for the selected representation.
+  compressed_destination_columns: null # Retained destination count plus one residual column.
   selection_mapping_fit_period: training_only
   selection_mapping_frozen_across_splits: true
   residual_flow_preserved_in_origin_totals: true
-  split_boundary_window_policy: null # Exact treatment of lookback windows at split boundaries is not supplied.
-  historical_reference_gap_policy: null # April is excluded from train/evaluation; permitted context for May references is unspecified.
+  split_boundary_window_policy: null # Lookback-window treatment at split boundaries.
+  historical_reference_gap_policy: null # Historical context used for May references across the April gap.
   data_availability: on_request
 
 main_task:
-  lookback_intervals: null # Section 5.6 gives sensitivity examples, not an unambiguous main-run setting.
+  lookback_intervals: null # Historical window length; sensitivity examples appear in Section 5.6.
   forecast_intervals: null
   batch_size: null
   full_training_epochs: null
@@ -48,8 +46,8 @@ main_task:
   learning_rate_schedule: null
   early_stopping_patience: null
   missing_value_policy: null
-  output_nonnegativity_policy: null # Do not silently import clipping behavior from historical code.
-  decoder_zero_input_scale_convention: null # Zero matrix is disclosed; treatment relative to normalization is not.
+  output_nonnegativity_policy: null # Forecast output constraint.
+  decoder_zero_input_scale_convention: null # Scale of the decoder zero input.
 
 hyperparameter_search:
   source: "Table 2 and Section 5.1.4, p. 22"
@@ -65,7 +63,7 @@ hyperparameter_search:
   pruner_parameters: null
   pruning_report_schedule: null
   trial_seed_policy: null
-  original_study_database: null
+  study_database: null
   space:
     alpha_decay:
       distribution: categorical
@@ -107,8 +105,8 @@ hyperparameter_search:
 
 knowledge_and_training:
   source: "Sections 4.3-4.6, pp. 13-18; Section 5.1.4, p. 22"
-  reconstruction_fit_protocol:
-    status: prescribed_for_future_implementation_not_verified_original_execution
+  fitting_protocol:
+    definition: pseudocode_convention
     fit_split: training_only
     components: [generation_estimators, gravity_zeta, autoencoders, scalers, destination_mappings, residual_shares]
     validation_and_test: frozen_parameters_forward_only
@@ -119,15 +117,15 @@ knowledge_and_training:
     source: "Equation (14), pp. 13-14; Case 2c, Section 5.3.1, pp. 27-29"
     full: [PopAct, AgePct_work, EduPct, HHSize, Wknd, TOD, Season, Event]
     temporal_only: [Wknd, TOD, Season, Event]
-    time_of_day: "hours since local calendar midnight in [0,24), not elapsed service-day hours"
+    time_of_day: "hours since local calendar midnight in [0,24)"
     population_catchment_meters: 800
     event_scope_meters: 1000
     event_score_range: [0, 1]
     event_weights: null
     software_profile_field: "cfg.domain_knowledge.generation_covariates"
-    software_profile_status: explicit_reconstruction_interface
+    software_profile_kind: pseudocode_interface
   trip_generation_pretraining_hyperparameters: null
-  trip_generation_main_training_freezing_policy: null # Not fully specified by the paper; evaluation always uses frozen parameters.
+  trip_generation_main_training_freezing_policy: null # Generation-estimator parameter updates during main training.
   gravity_deterrence:
     function: "exp(-zeta * impedance)"
     zeta: null
@@ -142,7 +140,7 @@ knowledge_and_training:
     phase_2: joint_encoder_fine_tuning_with_forecasting_model
     architectures_and_pretraining_schedule: null
     section_probability_pretraining_protocol: initialize_and_record_utility_coefficients_before_generating_training_matrices
-    original_section_probability_pretraining_coefficients: null # Record future implementation provenance; original artifact not recovered.
+    section_probability_pretraining_coefficients: null # Utility coefficients used to form pretraining matrices.
   utility_initialization:
     precision: reported_rounded
     per_station: -0.30
@@ -156,19 +154,19 @@ knowledge_and_training:
     attraction_totals: retained_destination_mapping_plus_training_period_residual_allocation
     zero_residual_allocation_denominator: uniform_over_non_retained_destinations
     auxiliary_weight: "initial_weight * max(1 - alpha_decay * epsilon, 0)"
-    epoch_origin_for_formula: null # The training-loop epoch-index convention is unresolved.
+    epoch_origin_for_formula: null # Mapping from loop epochs to the formula index epsilon.
     selected_weight_zero_condition: "epsilon >= 10"
     illustrative_formula_values:
-      interpretation: formula_indices_not_recovered_training_loop_epoch_numbers
+      interpretation: values_at_formula_index_epsilon
       epsilon_0_weight_multiplier: 1.0
       epsilon_9_weight_multiplier: 0.1
       epsilon_10_weight_multiplier: 0.0
-    minibatch_estimator: null # Must be declared for the full Eq. (16) sum and full Eq. (18) mean objectives.
+    minibatch_estimator: null # Estimator for the Eq. (16) sum and Eq. (18) mean objectives.
     minibatch_sampling_and_example_multiplicity: null
-    minibatch_normalization_and_accumulation: null # Paper's sum must not silently become mean(abs(error)) or abs(mean(error)).
+    minibatch_normalization_and_accumulation: null # Scaling of station-wise squared errors and OD absolute errors.
   checkpoint_selection: lowest_validation_mae
   checkpoint_tie_breaking: null
-  test_used_for_tuning_or_selection: false
+  test_role: final_evaluation
   test_curves_in_paper: post_hoc_diagnostics_only
 
 evaluation:
@@ -188,7 +186,7 @@ evaluation:
     group_flow_shares: {head: 0.30, body: 0.50, tail: 0.20}
     cumulative_thresholds: [0.30, 0.80, 1.00]
     reported_OD_pair_shares: {head: 0.062, body: 0.375, tail: 0.563}
-    OD_pair_share_status: observed_paper_result_not_partition_parameters
+    OD_pair_share_status: paper_reported_group_statistics
     grouping_reference_period: null
     threshold_crossing_and_tie_policy: null
     horizon_overlap_counting_policy: null
@@ -196,18 +194,14 @@ evaluation:
   main_result_paper_reported:
     source: "Table 3, p. 23"
     precision: reported_rounded
-    reproduced_here: false
     mae: 1.02
     rmse: 3.04
     wmape_percent: 54.25
   baseline_model_count_reported: 10
-  baselines_and_ablations_status: paper_reported_not_reproduced
-  original_checkpoints_predictions_and_run_manifests: null
+  baselines_and_ablations_source: published_paper
 
 indirect_operational_assessment:
   source: "Section 5.5 and Table 8, pp. 32-33"
-  direct_path_labels_available: false
-  direct_continuous_section_flow_validation: false
   assignment_scope: explicitly_retained_real_od_pairs_only
   residual_destination_assigned_a_path: false
   observed_unit: designated_carriage_in_a_selected_train
@@ -228,24 +222,4 @@ indirect_operational_assessment:
   calibration_evaluation_separation: null
   uncertainty: residual_inter_carriage_imbalance_and_postprocessing_assumptions
   comparison_metrics: [WMAPE, Pearson_r]
-  interpretation: indirect_operational_plausibility_only
-
-future_implementation_checks:
-  status: required_not_run
-  checks:
-    - resolve_and_record_null_settings_before_claiming_reproduction
-    - fit_all_auxiliaries_gravity_encoders_scalers_mappings_and_shares_on_training_only
-    - verify_frozen_validation_and_test_forward_computations
-    - validate_split_and_prediction_origin_information_boundaries
-    - verify_nonzero_generation_loss_gradient_to_forecast_parameters
-    - verify_squared_error_and_destination_reconstruction_against_hand_examples
-    - declare_and_verify_minibatch_sampling_scaling_and_accumulation_against_full_objectives
-    - verify_formula_at_epsilon_0_9_10_and_declare_epoch_index_convention
-    - record_utility_initialization_before_section_probability_pretraining_matrix_generation
-    - verify_pretrained_encoders_are_registered_and_updated_by_forecasting_loss
-    - verify_pruner_receives_intermediate_validation_metrics_and_can_stop_trials
-    - verify_checkpoint_selection_cannot_access_test_scores
-    - verify_metric_definitions_and_horizon_aggregation_with_hand_examples
-    - verify_retained_od_path_flow_conservation_and_residual_exclusion
-    - validate_load_alignment_units_calibration_provenance_and_uncertainty
-    - archive_exact_config_environment_seed_split_checkpoint_and_predictions
+  interpretation: indirect_operational_assessment

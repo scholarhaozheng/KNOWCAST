@@ -1,4 +1,5 @@
 MODULE generating_array_OD
+FORMAT Pseudocode.
 PURPOSE AFC extraction, station reconciliation, OD construction, compression, windows, and historical references.
 PAPER Sections 3.2, 4.2.1-4.2.4; Equations (1)-(9); Section 4.3.2 Equation (15).
 
@@ -9,7 +10,7 @@ SCHEMA
     station_order: immutable list of N canonical station identifiers.
     station_to_codes: canonical station index to distinct AFC station codes.
     code_to_station: AFC station code to one canonical station index.
-    journey_id: stable identifier for deduplication; never published in output.
+    journey_id: input-only stable identifier for deduplication.
     entry_time: actual tap-in timestamp with declared timezone.
     exit_time: actual tap-out timestamp, possibly unresolved.
     entry_interval: interval containing entry_time under declared boundary rules.
@@ -123,7 +124,7 @@ PROCEDURE save_to_pickle
     INPUT data: artifact payload with metadata.
     INPUT filename: intended local destination.
     OUTPUT write receipt or explicit failure.
-    NOTE the legacy name denotes serialization, not a required executable format.
+    The procedure name denotes artifact serialization.
     VERIFY destination parent and write policy.
     VERIFY payload schema before serialization.
     WRITE to a temporary sibling artifact.
@@ -471,7 +472,7 @@ PROCEDURE process_data_D
         RETAIN actual future matrices as targets only.
         RECORD input and target timestamp arrays.
     END FOR
-    IF this reduced routine intentionally omits unfinished inputs:
+    IF this reduced routine omits unfinished inputs:
         LABEL the result as an ablation-input artifact.
     END IF
 
@@ -486,7 +487,7 @@ PROCEDURE Connect_to_SQL
     OUTPUT df, time_axis, station_to_codes, code_to_station.
     READ the canonical station dictionary.
     SELECT the configured read query matching prefix.
-    REJECT unknown prefix rather than selecting an unrelated default month.
+    REJECT an unknown prefix.
     REQUIRE an explicit column schema and declared date bounds.
     OPEN a database connection without printing connection secrets.
     TRY:
@@ -508,7 +509,7 @@ PROCEDURE Connect_to_SQL
     NORMALIZE station names using an explicit station-alias table.
     COLLECT all entry codes seen for each canonical station name.
     COLLECT all exit codes seen for each canonical station name.
-    UNION both sets; do not prefer the exit set and discard entry aliases.
+    UNION the entry and exit sets.
     MERGE the reviewed supplemental code table.
     LEGACY SUPPLEMENTAL MAPPING FOR REVIEW:
         新市桥 -> 521; 南门 -> 522; 南园北路 -> 523.
@@ -518,7 +519,7 @@ PROCEDURE Connect_to_SQL
         苏州奥体中心 -> 533; 方洲公园 -> 534; 星塘街 -> 535.
         龙墩 -> 536; 东沙湖 -> 537; 葑亭大道 -> 538.
         阳澄湖南 -> 539.
-        双桥 and 红庄 legacy zero entries mean unresolved, not valid AFC code zero.
+        双桥 and 红庄 legacy zero entries denote unresolved AFC codes.
     REQUIRE this mapping to match the supplied data period before use.
     REMOVE duplicate aliases per canonical station.
     BUILD the inverse code_to_station map.

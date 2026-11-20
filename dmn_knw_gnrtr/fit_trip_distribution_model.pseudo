@@ -1,4 +1,5 @@
 MODULE fit_trip_distribution_model
+FORMAT Pseudocode.
 PURPOSE Calibrate the fixed deterrence coefficient and balance gravity flows at each time.
 PAPER Section 4.4, Eq. (20).
 

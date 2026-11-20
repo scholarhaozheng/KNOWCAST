@@ -1,4 +1,4 @@
-"""Independent numeric fixtures for the specification; does not execute .pseudo files."""
+"""Numerical examples for flow allocation, training losses, metrics, and data timing."""
 from __future__ import annotations
 import argparse
 import itertools
@@ -32,7 +32,7 @@ normal=allocate(12,[1,2,3]); zero=allocate(12,[0,0,0]); none_unfinished=allocate
 close(normal,[2,4,6]); close(zero,[4,4,4]); close(none_unfinished,[0,0,0])
 assert all(math.isclose(sum(a),u) for a,u in [(normal,12),(zero,12),(none_unfinished,0)])
 check('unfinished_allocation_and_observed_zero', expected_nonzero=[2,4,6],actual_nonzero=normal,
-      expected_zero=[4,4,4],actual_zero=zero,missing_history='not treated as an observed zero')
+      expected_zero=[4,4,4],actual_zero=zero,missing_history_policy='separate missing-data state')
 
 # Each row's retained column names a different destination; residual weights are fixed.
 rds=[1,2,0]
@@ -68,7 +68,7 @@ close(fd,expected_grad)
 assert sum(x*x for x in [1,-1]) == 2 and abs(sum([1,-1])/2)==0
 check('Eq16_squared_loss_and_OD_finite_difference',expected_loss=9,actual_loss=generation_loss(pred),
       expected_gradient=expected_grad,finite_difference_gradient=fd,
-      autograd_test='not_run; numeric reference only',squared_cancellation_counterexample=2)
+      gradient_method='central finite difference',squared_cancellation_counterexample=2)
 
 # M=4 complete target matrices, each with N*K=6 cells; choose every m=2 subset.
 E=[6,12,18,24]; G=[1,4,9,16]; M=4; cells=6; m=2
@@ -83,12 +83,12 @@ acc_g=sum(sum(G[j] for j in s) for s in micro)
 close([acc_od,acc_g],[full_od,full_g])
 check('declared_minibatch_estimators',full_objectives=[full_od,full_g],
       expected_uniform_subset_estimators=[mean_od,mean_g],full_partition_accumulation=[acc_od,acc_g],
-      subset_count=len(est),policy='explicit reconstruction choices; not recovered historical optimizer behavior')
+      subset_count=len(est),policy='uniform sampling of complete target matrices; full-partition accumulation')
 
 decay=[.0264*max(1-.1*e,0) for e in [0,9,10,11]]
 close(decay,[.0264,.00264,0,0])
 check('Eq17_formula_indices',epsilon=[0,9,10,11],weights=decay,
-      epoch_index_mapping='must be declared separately')
+      epoch_index_mapping='configuration parameter')
 
 def metrics(pred,truth):
     err=[abs(p-y) for p,y in zip(pred,truth)]
@@ -113,7 +113,7 @@ expected_set=set(truth_by_id)
 assert set(x[0] for x in shuffled[:-1])!=expected_set
 check('sample_ID_join_and_final_partial_batch',shuffled_ids=[x[0] for x in shuffled],
       paired_truth=[x[2] for x in aligned],batch_sizes=list(map(len,batches)),
-      missing_sample_detected=True,scope='reference join, not execution of DataLoader pseudocode')
+      missing_sample_detected=True,join_key='sample_id')
 
 cutoff=datetime.fromisoformat('2023-05-01T10:20:00')
 records=[{'origin':0,'dest':1,'entry':'2023-05-01T10:02:00','exit':'2023-05-01T10:10:00'},
@@ -126,18 +126,17 @@ for row in records:
     else: unfinished+=1
 assert sum(finished)+unfinished==3 and finished==[0,1,0] and unfinished==2
 check('cutoff_finished_unfinished_conservation',actual_cohort=3,finished=finished,unfinished=unfinished,
-      delayed_exit_destinations='not available in encoder inputs at cutoff',
-      fixture_assumption='event available at its timestamp; ingestion-delay policy requires separate metadata')
+      delayed_exit_destinations='hidden until exit time',
+      fixture_assumption='event available at its timestamp')
 
 freq_hour=60/5; interval_count=freq_hour*15/60
 close([freq_hour,interval_count],[12,3])
 check('service_frequency_unit_conversion',headway_minutes=5,frequency_per_hour=freq_hour,
       interval_minutes=15,departures_per_interval=interval_count,
-      storage_unit='declared reconstruction convention')
+      storage_unit='trains_per_hour')
 
-report={'artifact_kind':'independent_data_training_formula_reference_checks',
-        'executed_pseudocode':False,'executed_original_code':False,'trained_model':False,
-        'reproduced_paper_results':False,'dependencies':['Python standard library'],
+report={'artifact_kind':'data_training_formula_examples',
+        'dependencies':['Python standard library'],
         'checks_passed':len(checks),'checks':checks}
 rendered = json.dumps(report, indent=2, ensure_ascii=False)
 if args.output is not None:

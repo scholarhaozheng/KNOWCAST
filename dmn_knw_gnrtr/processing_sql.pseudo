@@ -1,4 +1,5 @@
 MODULE processing_sql
+FORMAT Pseudocode.
 PURPOSE Inspect AFC table schemas, combine approved source tables, and prepare date-range extracts.
 PAPER Section 5.1.1 data periods; Section 4.2.1 event-time observability.
 
@@ -85,7 +86,7 @@ PROCEDURE extract_filtered_data
         RESPECT the service timezone and any declared service-day rollover.
     END IF
     BIND date values as query parameters.
-    RESOLVE table identifiers from validated configuration, not arbitrary date text.
+    RESOLVE table identifiers from validated configuration.
     CREATE an empty staging table using the required source schema.
     SELECT canonical journey fields within the requested entry-cohort date range.
     PRESERVE exit events required to resolve those entry cohorts.

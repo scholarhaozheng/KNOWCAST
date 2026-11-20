@@ -1,6 +1,6 @@
 # Data, observability, and selective aggregation
 
-The source is Sections 4.2.1-4.2.4, Equations (2)-(9), and the residual-allocation rule in Section 4.3.2, Equation (15), of the [published paper](https://doi.org/10.1016/j.trc.2026.105710), PDF pages 11-14. Symbols below make the time and tensor dimensions explicit without prescribing a software implementation.
+Sections 4.2.1–4.2.4 and 4.3.2 of the [paper](../docs/assets/knowcast-paper.pdf), pp. 11–14, define cutoff observations, selective aggregation, unfinished allocation and residual shares in Eqs. (2)–(9) and (15).
 
 ## Inputs and outputs
 
@@ -16,16 +16,16 @@ Let `N = |STN|`, `R = |RDS|`, and `K = R + 1`. There are `R` explicitly retained
 | `w_res` | `[N, N]` | Fixed training-period shares for non-retained destinations |
 | `D_delta`, `U_alloc_delta` | `[N, K]` each | Historical destination shares and allocated unfinished counts |
 
-For one forecast sample, finished inputs have shape `[L_h, N, K]`, unfinished counts have shape `[L_h, N, 1]`, and each of the three allocated unfinished sequences has shape `[L_h, N, K]`. Actual future targets have shape `[L_f, N, K]`. A batching implementation may prepend a batch dimension; this does not change any station or destination meaning.
+For one forecast sample, finished inputs have shape `[L_h, N, K]`, unfinished counts have shape `[L_h, N, 1]`, and each allocated unfinished sequence has shape `[L_h, N, K]`. Future targets have shape `[L_f, N, K]`. Batching prepends the batch axis to each tensor.
 
 ## 1. Keep observation time separate from label resolution
 
-An AFC journey supplies its origin and tap-in time when the passenger enters. Its destination and tap-out time become observations only when the journey ends. An offline record containing the eventual destination must not make that destination available earlier in a simulated forecast.
+An AFC journey supplies its origin and tap-in time at entry. Its destination and tap-out time become observable when the journey ends. Build every input from information available at the forecast cutoff.
 
 For every lookback interval, use the same sample-specific cutoff `t0`. A journey in that interval may be unfinished for one forecast and finished for a later forecast.
 
 ```text
-CONCEPTUAL PROCEDURE: BUILD AN OBSERVABLE LOOKBACK AT t0
+PROCEDURE: BUILD AN OBSERVABLE LOOKBACK AT t0
 
 INPUT:
   AFC journey records, historical entry intervals, and forecast cutoff t0
@@ -40,7 +40,7 @@ FOR EACH lookback interval tau, in chronological order:
       Add one to F_raw[tau; t0, origin, observed destination].
     OTHERWISE:
       Add one to U_raw[tau; t0, origin].
-      Do not expose the eventual destination to the model.
+      Store the unfinished journey as an origin-level count.
 
   Compress F_raw using the fixed RDS mapping.
   Keep U_raw as an origin-level vector.
@@ -48,7 +48,7 @@ FOR EACH lookback interval tau, in chronological order:
 SEPARATE OFFLINE LABEL PROCEDURE:
   Resolve complete journeys by entry interval and eventual destination.
   Construct A_raw and compress it using the same fixed RDS mapping.
-  Supply future A matrices as supervised targets, not inference inputs.
+  Store future A matrices as supervised targets.
 
 OUTPUT:
   Observable finished and unfinished lookback tensors
@@ -62,16 +62,16 @@ $$
 = \sum_n F^{\mathrm{raw}}_{mn}(t_0) + U^{\mathrm{raw}}_m(t_0).
 $$
 
-This is a count-conservation check over the same journey population. In particular, an actual OD row cannot simultaneously be treated as a finished row and its entire row total as unfinished demand. A legitimate empty historical row and a missing or invalid record are different data conditions.
+The identity uses the same entry interval and journey population on both sides. Finished and unfinished journeys form disjoint groups. Keep observed zero rows separate from missing records.
 
-**Implementation decisions not supplied by the paper:** tap-time precision and interval boundary conventions; service-day boundaries; duplicate, unmatched, invalid, or delayed AFC records; and how an offline label set is finalized. A future implementation must document these decisions and reconcile the journey population before claiming the conservation identity holds.
+**Configuration:** timestamp precision, interval and service-day boundaries, duplicate and unmatched-record handling, delayed tap-outs and label-finalization rules.
 
 ## 2. Fit one origin-specific destination mapping on training data
 
-Sections 4.2.2 and Equations (3)-(4) retain destination identity separately for each origin. Column `k` is not a common destination station across all rows.
+Sections 4.2.2 and Eqs. (3)–(4) retain destination identity separately for each origin: slot `k` maps through `RDS[m,k]`.
 
 ```text
-CONCEPTUAL PROCEDURE: FIT AND FREEZE THE DESTINATION MAPPING
+PROCEDURE: FIT AND FREEZE THE DESTINATION MAPPING
 
 INPUT:
   Actual raw OD matrices from the training period only
@@ -87,13 +87,12 @@ STORE AND FREEZE:
 
 USE:
   The identical mapping for every training, validation, and test interval
-  Do not re-rank destinations on validation or test flows.
 ```
 
 The transformation for either `X = A_raw` or `X = F_raw(t0)` is:
 
 ```text
-CONCEPTUAL PROCEDURE: COMPRESS A RAW OD MATRIX X
+PROCEDURE: COMPRESS A RAW OD MATRIX X
 
 FOR EACH origin m:
   FOR retained slot k = 1,...,R:
@@ -103,16 +102,16 @@ FOR EACH origin m:
 RETURN X_compressed with shape [N,K]
 ```
 
-Each row total must be preserved. A dimension-retention ratio describes the compressed matrix size, not the fraction of passenger volume retained. The final slot has no unique destination, so it has no unique candidate-path set.
+Compression preserves each origin total. The dimension-retention ratio measures matrix size; passenger counts in nonretained destinations remain in the residual slot. Path assignment uses the retained real destinations.
 
-**Implementation decisions:** tie-breaking in training-period ranks and how an approximate reported retention ratio is translated into an integer `R`. The paper does not justify recovering either decision from an old filename or configuration.
+**Configuration:** tie-breaking in training-period destination ranks and the integer retained count `R`.
 
 ## 3. Store the fixed residual allocation used for destination totals
 
-Equation (15) uses training-period shares to approximately assign a predicted residual total back to non-retained destination stations for the attraction-consistency loss. This operation does not recover individual residual OD flows or authorize assigning the residual slot to one path.
+Equation (15) distributes a predicted residual total over nonretained destinations using training-period shares, supplying station attractions for the consistency loss.
 
 ```text
-CONCEPTUAL PROCEDURE: FIT RESIDUAL DESTINATION SHARES
+PROCEDURE: FIT RESIDUAL DESTINATION SHARES
 
 FOR EACH origin m:
   total_residual <- sum of training_flow[m,n] over residual_set[m]
@@ -136,14 +135,14 @@ $$
 + \sum_{m:\,n\notin\mathrm{RDS}_m}w^{\mathrm{res}}_{mn}\widehat Y_{mK}.
 $$
 
-Thus, origin totals and reconstructed destination totals sum to the same overall predicted flow. Directly summing compressed columns across origins does not implement this operator.
+Origin totals and estimated destination totals sum to the same predicted flow. Destination totals gather retained slots by station ID and add residual shares.
 
 ## 4. Build day, week, and month references at the correct timestamps
 
-Equation (5) organizes the offsets `{0, 1, 7, mo}`. Equations (7)-(9) allocate unfinished trips using only `{1, 7, mo}`: the previous day, the same weekday in the previous week, and the same calendar day in the previous month. The current-day actual destination distribution is excluded because it is not fully observable at the forecast cutoff.
+Equation (5) organizes offsets `{0, 1, 7, mo}`. Equations (7)–(9) allocate unfinished trips from the previous day, the same weekday in the previous week and the same calendar day in the previous month. These references are completed historical OD available at the forecast cutoff.
 
 ```text
-CONCEPTUAL PROCEDURE: ALLOCATE UNFINISHED TRIPS
+PROCEDURE: ALLOCATE UNFINISHED TRIPS
 
 FOR EACH lookback timestamp tau, from oldest to newest:
   FOR EACH reference delta in {previous day, previous week, previous month}:
@@ -164,11 +163,11 @@ PASS each sequence, in chronological order, to its corresponding
 unfinished-trip GATRU branch in Equation (9).
 ```
 
-For every origin, timestamp, and reference source, the shares sum to one and the allocated row sums to the current unfinished count. These are three alternative allocations of the same unfinished count; adding them as passenger counts would triple-count that demand. Their representations are fused by the model's gating mechanism.
+For each origin, timestamp and reference, destination shares sum to one and the allocated row sums to the unfinished count. The three allocations describe alternative destination distributions; the model fuses their recurrent representations.
 
-**Implementation decisions:** an absent calendar day in the previous month, missing historical intervals, and history extending before a dataset split. The paper's uniform fallback covers an observed zero row; it does not specify a missing-history policy. A future implementation must declare that policy, preserve timestamp alignment, and never substitute a later observation or wrap a negative index to the end of a split. Available operational history and the periods used to fit model parameters must be recorded separately.
+**Configuration:** missing calendar dates, missing intervals and history across split boundaries. Observed zero rows use uniform shares; missing rows follow the configured reference policy. Every selected reference carries its timestamp and availability.
 
-## Method-level checks
+## Invariants
 
 - `A_raw`, `F_raw`, and `U_raw` refer to the same entry interval and journey population; only `F_raw` and `U_raw` depend on `t0`.
 - Every compressed slot retains its origin-specific meaning across all dataset splits.

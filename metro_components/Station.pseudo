@@ -1,4 +1,5 @@
 MODULE Station
+FORMAT Pseudocode.
 PURPOSE Represent one physical station shared by all serving lines.
 PAPER Sections 4.3 and 4.5–4.8.
 

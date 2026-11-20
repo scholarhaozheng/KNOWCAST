@@ -1,12 +1,10 @@
 MODULE lib
-STATUS non-executable package boundary reconstruction
-PACKAGE_ROLE empty package initializer; no class or procedure is required
+FORMAT Pseudocode.
+PURPOSE Empty package initializer for metrics and data utilities.
 
 PACKAGE CONTRACT
     Expose metrics and utils_CUROP through explicit module references.
     Initialize package symbols; defer configuration and artifact reads to entrypoint calls.
     Create worker pools and select devices when the relevant runtime procedure is called.
-    Preserve the package boundary for the original training/evaluation call graph.
-    All operations are specified in sibling .pseudo files.
-    No source callable is omitted by this empty-module counterpart.
+    Component procedures are defined in the sibling modules.
 END MODULE

@@ -1,4 +1,5 @@
 MODULE Section
+FORMAT Pseudocode.
 PURPOSE Represent one directed physical section on one serving line.
 PAPER Eq. (24) and Eqs. (25)–(26).
 

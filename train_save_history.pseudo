@@ -1,5 +1,5 @@
 MODULE train_save_history
-EDITION paper-aligned reconstruction; NON-EXECUTABLE PSEUDOCODE
+FORMAT Pseudocode.
 PURPOSE main training, generation consistency, checkpoint selection, history and diagnostics
 PAPER Sections 3.2, 4.3, 5.1.3-5.1.4 and 5.2; Eqs. (15)-(19), (34)-(37)
 DEPENDENCIES lib/utils_CUROP.pseudo; models/Net_0207.pseudo;
@@ -8,7 +8,7 @@ DEPENDENCIES lib/utils_CUROP.pseudo; models/Net_0207.pseudo;
 TRAINING CONTRACT
     N = stations; R = retained destinations per origin; K = R+1 including residual.
     lh and lf are independent input and output sequence lengths.
-    Genuine batch size is read from each batch; it is not the configured nominal size.
+    Genuine batch size is read from each batch.
     N_train counts predicted OD matrices included in the declared full objective.
     IF each of Q windows contributes lf targets, N_train = Q*lf under that convention.
     Overlapping target times may appear more than once; record that multiplicity explicitly.
@@ -16,8 +16,7 @@ TRAINING CONTRACT
     Eq. (18) uses original-scale OD mean absolute error.
     Eq. (16) uses SUM of squared production AND destination-attraction residuals.
     Eq. (19) combines the two with the epoch-dependent Eq. (17) weight.
-    The paper does not fully specify minibatch scaling or epoch-index conventions.
-    REQUIRE declared choices and label them as reconstruction choices.
+    PARAMETERS Minibatch estimator and epoch_origin are supplied by the run configuration.
     A frozen auxiliary model may produce detached targets; predicted-OD residuals retain gradients.
     Main-model learned encoders and utility coefficients are registered optimizer parameters.
     Validation selects checkpoints; test data is inaccessible during all selection decisions.
@@ -68,7 +67,7 @@ PROCEDURE compute_epoch_od_errors(y_preds,y_truth,valid_mask=all_true)
         mean_error[o,k] <- numerator/denominator if count>0, otherwise undefined.
     END FOR
     RETURN mean_error[N,K] and valid counts.
-    The second matrix axis is compressed destination column, not a global station ID.
+    The second matrix axis is the compressed destination slot, mapped through RDS[origin,slot].
 END PROCEDURE
 
 PROCEDURE main(args,validation_callback=None,allow_test_evaluation=true)
@@ -131,7 +130,7 @@ PROCEDURE main(args,validation_callback=None,allow_test_evaluation=true)
     REQUIRE gravity zeta and mapping/scaler buffers are excluded from gradient updates.
     Apply the declared independent-generation parameter policy.
     optimizer_parameters <- copy cfg.train.optimizer_parameters.
-    Reject a conflicting optimizer_parameters learning rate rather than ignoring the sampled base_lr.
+    Reject conflicting optimizer_parameters.learning_rate and sampled base_lr values.
     optimizer_parameters.learning_rate <- cfg.train.base_lr after that consistency check.
     optimizer <- BUILD_OPTIMIZER(model,cfg.train.optimizer,optimizer_parameters).
     scheduler <- BUILD_DECLARED_SCHEDULER(optimizer,cfg.train.schedule).
@@ -188,7 +187,7 @@ PROCEDURE main(args,validation_callback=None,allow_test_evaluation=true)
                 Keep three unfinished allocations separate from raw historical reference counts.
                 IF beginning an optimizer accumulation group, clear gradients.
                 forecast <- model.forward(bundle,mode=TRAIN_TEACHER_FORCING).
-                Teacher forcing may use previous target interval; current/future target never leaks early.
+                Teacher forcing uses only the preceding target interval.
                 loss_result <- COMPUTE_TRAINING_LOSS(forecast,bundle,scaler_tensor,RDS,residual_shares,
                     flags.generation_guidance,generation_weight,objective_context).
                 loss <- loss_result.total.
@@ -198,7 +197,7 @@ PROCEDURE main(args,validation_callback=None,allow_test_evaluation=true)
                 od_term <- loss_result.od_term; generation_term <- loss_result.generation_term.
                 Backpropagate according to the declared accumulation policy recorded in objective_context.
                 Under full_objective_gradient_accumulation, the group is the entire epoch partition;
-                    do not step or zero gradients between its microbatches and do not divide by their count.
+                    retain gradients across its microbatches without intermediate optimizer steps, gradient resets or count scaling.
                 Under an unbiased stochastic policy, each batch is one update unless a separately
                     declared averaging-of-estimators policy specifies exact group weights.
                 Before the first optimizer update with active generation guidance:
@@ -221,12 +220,12 @@ PROCEDURE main(args,validation_callback=None,allow_test_evaluation=true)
                 Record optimization estimator values separately from count-weighted reporting values.
                 Record batch_index, displayed_epoch, epsilon, actual_B and optimizer step.
                 Record current utility coefficients with actual step identity when that layer is active.
-                Mark inactive/frozen utility branches explicitly, rather than accessing absent weights.
+                Mark inactive/frozen utility branches and read weights only for active branches.
                 Append sample IDs and update processed matrix count excluding padding.
-                Release transient forward tensors after backward; do not retain computation graphs in logs.
+                Release transient forward tensors after backward and store detached values in logs.
             END FOR
             IF a final accumulation group has pending gradients:
-                Apply only the recorded estimator weights; never invent a nominal-size divisor.
+                Apply the recorded estimator weights.
                 Validate gradients, apply the same clipping rule and perform one optimizer update.
                 Increment global_optimizer_step and advance the per-update scheduler once.
                 Clear pending-gradient state before allowing a resumable epoch checkpoint.
@@ -280,7 +279,7 @@ PROCEDURE main(args,validation_callback=None,allow_test_evaluation=true)
                 estimator metadata, RNG streams, artifact references and complete history position.
             run_state.is_selected_best <- improved.
             run_state.best_checkpoint_reference <- 'this_state' if improved,
-                otherwise the existing verified best_checkpoint ID/path; never embed a self-referential content hash.
+                otherwise the existing verified best_checkpoint ID/path.
             saved_state <- SAVE_CHECKPOINT_BUNDLE(model,optimizer,scheduler,run_state,run_dir/'last').
             Publish the last pointer to saved_state without replacing immutable payloads in place.
             IF improved: best_checkpoint <- saved_state; atomically publish its best pointer.
@@ -289,10 +288,10 @@ PROCEDURE main(args,validation_callback=None,allow_test_evaluation=true)
                 Retain this same immutable state under the epoch identity.
             END IF
             Save matching best validation predictions when improved, or regenerate after restore.
-            Persist histories incrementally so pruning/failure does not erase prior progress.
+            Persist histories incrementally across trial and epoch boundaries.
             IF validation_callback exists:
                 validation_callback(displayed_epoch,val_result.MAE_od,saved_state.manifest).
-                Permit pruning only after artifacts and state needed for audit are written.
+                Permit pruning after run artifacts and resumable state are written.
             END IF
             early_stop <- declared patience rule using validation only.
             IF early_stop: record reason and stop epoch loop.
@@ -321,7 +320,7 @@ PROCEDURE main(args,validation_callback=None,allow_test_evaluation=true)
                 logger,best_epoch,selected_checkpoint.global_step,selected_checkpoint.manifest).
             Persist test predictions, truth, mask, sample identities and per-horizon metrics.
         ELSE:
-            selected_test <- absent; do not substitute validation metrics under test labels.
+            selected_test <- absent; validation metrics keep their validation labels.
         END IF
         IF posthoc_test_curves requested:
             REQUIRE allow_test_evaluation=true and this run is not a search trial.
@@ -333,7 +332,7 @@ PROCEDURE main(args,validation_callback=None,allow_test_evaluation=true)
         EXPORT_HISTORY_AND_DIAGNOSTICS(epoch_history,batch_history,
             utility_step_history,utility_epoch_history,
             per_epoch_od_errors,selected_val,cfg,run_dir).
-        Write best_epoch.txt and selected checkpoint ID, preserving original output compatibility.
+        Write best_epoch.txt and the selected checkpoint ID.
         run_manifest.status <- COMPLETE.
         Attach the selected checkpoint ID and exported artifact hashes to run_manifest.
         WRITE_MANIFEST(run_dir,run_manifest).
@@ -350,7 +349,7 @@ PROCEDURE main(args,validation_callback=None,allow_test_evaluation=true)
     result <- TrainingResult(best_validation_mae,best_epoch,best_checkpoint,
         selected_validation=selected_val,selected_test=selected_test,run_dir=run_dir,manifest=run_manifest).
     RETURN result.
-    A source-compatible numeric adapter returns only best_validation_mae when requested.
+    The numeric compatibility adapter returns best_validation_mae.
 END PROCEDURE
 
 PROCEDURE READ_TRAINING_RESUME_BUNDLE(path,device,cfg)
@@ -359,7 +358,7 @@ PROCEDURE READ_TRAINING_RESUME_BUNDLE(path,device,cfg)
     OUTPUT ResumeBundle with model/training state and artifact references.
     Read the external manifest and verify schema, model family and checkpoint payload hash.
     REQUIRE a trusted local or safe data-only format and explicit device mapping.
-    REQUIRE a complete epoch-boundary bundle, not a bare legacy weight dictionary.
+    REQUIRE a complete epoch-boundary bundle containing model, optimizer, scheduler and resume state.
     Load model, optimizer, scheduler and RNG states without modifying a live model yet.
     Load completed_epoch,next_epoch,global_step,best checkpoint identity and patience state.
     Resolve a stored 'this state is best' marker to this verified bundle's own ID/path.
@@ -380,7 +379,7 @@ PROCEDURE PREPARE_TRAINING_DATASET(cfg,artifact_registry,resume_state)
     PARAMETERS cfg.
     OUTPUT training/validation DatasetBundle and persisted transform identities.
     component_context <- merge cfg.resolved_component_context with the verified immutable artifact registry.
-    Reject conflicting IDs or flags instead of overwriting either source silently.
+    Reject conflicting IDs or flags.
     Attach cfg's normalized component switches, generation_covariates profile and external-input dependencies.
     Bind component_context's training sampler stream from cfg.train.sampler; evaluation uses no shuffle stream.
     IF resume_state is absent:
@@ -407,7 +406,7 @@ PROCEDURE PREPARE_TRAINING_DATASET(cfg,artifact_registry,resume_state)
     Keep April excluded under the reported March/May protocol unless a separate experiment says otherwise.
     Preserve raw reference history on disk and use the loader's already normalized allocation streams.
     Persist newly fitted scaler artifacts and their hashes before constructing checkpoints.
-    RETURN the named DatasetBundle; mapping aliases do not replace its documented fields.
+    RETURN the named DatasetBundle with its documented fields.
 END PROCEDURE
 
 PROCEDURE COLLATE_TRAINING_BATCH(batch,graph,device,lh,lf,N,K,component_context,flags)
@@ -416,7 +415,7 @@ PROCEDURE COLLATE_TRAINING_BATCH(batch,graph,device,lh,lf,N,K,component_context,
     OUTPUT BatchBundle containing genuine training samples only.
     REQUIRE batch.valid_mask is a boolean sample-padding mask with one entry per stored row.
     genuine_indices <- positions where batch.valid_mask is true.
-    Reject an empty genuine_indices list; never infer padding from all-zero demand.
+    Reject an empty genuine_indices list; padding is defined by valid_mask.
     FOR every field declared sample-indexed in BatchRecord's schema:
         Select genuine_indices along its declared sample axis, including all times, IDs,
             dense/normalized/count histories, observation masks, availability and ragged path lists.
@@ -442,7 +441,7 @@ PROCEDURE EVALUATE_TRAINING_SPLIT(model,dataset,split,graph,device,cfg,flags,
     IF saved_manifest is present:
         state_manifest <- saved_manifest; verify current model tensor digest matches its model-state digest.
     ELSE:
-        REQUIRE split is train or val; a search/current-epoch state cannot open test here.
+        REQUIRE split in {train,val} for search/current-epoch evaluation.
         state_manifest <- an in-memory provenance record with artifact_role='live_training_state'.
         Record current model tensor digest, epoch,global_step,architecture and fixed-artifact IDs.
         Include station_order_id,RDS_id,residual_shares_id,transform_id and graph IDs.
@@ -564,13 +563,12 @@ PROCEDURE DECLARED_MINIBATCH_ESTIMATOR(od_absolute,generation_per_matrix,
     J <- context.full_objective_index.
     matrix_ids <- [(sample_ids[b],context.target_times_by_sample[sample_ids[b]][h],0)
         FOR b IN 0..B-1 FOR h IN 0..lf-1].
-    Each matrix identity is (sample_id,horizon timestamp,declared replicate index), not sample_id alone.
+    Each matrix identity is (sample_id,horizon timestamp,declared replicate index).
     REQUIRE od_absolute shape [B,lf,N,K], generation_per_matrix shape [B,lf], and matching masks.
     REQUIRE all sample-padding masks are true after collation; any replica has an explicit sampling weight.
     Match those matrix identities to context.full_objective_index and inclusion probabilities.
     For the reported complete-observation objective require every target_observation_mask cell true.
-    IF cells are missing, require a separate explicitly specified objective and denominator;
-        such a variant must not be silently labeled an exact implementation of Eq. (18).
+    IF cells are missing, require the variant's specified objective and denominator.
     For complete matrices, E_j <- sum over N*K OD absolute errors in target matrix j.
     G_j <- generation_per_matrix at j's (batch row,horizon) position, already computed as
         the sum over N production residual squares plus N attraction residual squares.
@@ -583,8 +581,7 @@ PROCEDURE DECLARED_MINIBATCH_ESTIMATOR(od_absolute,generation_per_matrix,
         od_term <- sum_batch E_j/(m*N*K).
         generation_term <- (M/m)*sum_batch G_j.
         Their expectations equal the two full objectives under the stated sampling conditions.
-        This expectation is a fixed-parameter sampling identity. Random reshuffling with parameter updates
-            is not claimed to give a conditionally unbiased full gradient after earlier draws in the epoch.
+        This expectation is evaluated at fixed parameters and before conditioning on earlier within-epoch draws.
     CASE full_objective_gradient_accumulation:
         Partition the full target set into microbatches without changing parameter values.
         od_term <- sum_microbatch E_j/(M*N*K).
@@ -603,7 +600,7 @@ PROCEDURE DECLARED_MINIBATCH_ESTIMATOR(od_absolute,generation_per_matrix,
         generation_term <- sum of this batch's squared station residuals.
         Label this an explicitly different objective scaling requiring a weight reinterpretation.
     OTHERWISE:
-        Reject missing/unknown estimator; do not use an opaque unrecoverable default.
+        Reject a missing or unknown estimator policy.
     END SWITCH
     Apply no masked-cell denominator substitution unless that separate objective was selected.
     scaling <- {policy:context.estimator_policy,N_train:M,batch_matrices:m,stations:N,destinations:K}.
@@ -701,7 +698,7 @@ PROCEDURE EXPORT_HISTORY_AND_DIAGNOSTICS(epoch_history,batch_history,
     OUTPUT metric tables, prediction artifacts and diagnostic export receipts.
     Validate each epoch record has a unique displayed_epoch and actual formula index,
         or explicit NOT_APPLICABLE for a variant with generation guidance disabled.
-    Export tabular training_validation_metrics with original compatible columns.
+    Export the specified training_validation_metrics columns.
     Include Epoch,Train_OD_MAE,Train_Generation_Sum,Train_Optimization_Objective.
     Include Val_MAE,Val_RMSE,Val_WMAPE_percent and optional training-evaluation metrics.
     Include generation weight, learning rates, elapsed time and checkpoint-selection flag.
@@ -786,7 +783,7 @@ PROCEDURE SELECT_OD_DIAGNOSTICS(epoch_od_errors,selected_validation,cfg)
     FOR each pair in valid_pairs:
         IF cfg.diagnostics.diagnostic_score = relative_improvement:
             score <- (initial[o,k]-selected[o,k])/(initial[o,k]+declared_epsilon).
-            Keep sign; a large deterioration is not an improvement.
+            Keep the signed improvement; deterioration produces a negative value.
         ELSE IF cfg.diagnostics.diagnostic_score = absolute_relative_change:
             score <- abs(initial[o,k]-selected[o,k])/(initial[o,k]+declared_epsilon).
             Label this 'change magnitude', matching legacy intent without calling it improvement.
@@ -797,8 +794,8 @@ PROCEDURE SELECT_OD_DIAGNOSTICS(epoch_od_errors,selected_validation,cfg)
     END FOR
     Sort the scored valid_pairs using a deterministic tie rule.
     k <- minimum(requested_top_k,number of valid_pairs); legacy requested_top_k=5.
-    Choose pairs directly from scored valid_pairs, not an unfiltered all_pairs list.
-    Label these post hoc selected illustrations; they do not establish population-wide performance.
+    Choose pairs directly from scored valid_pairs.
+    Label these as selected-pair illustrations.
     RETURN selected real OD identities and compressed-column references.
 END PROCEDURE
 
@@ -827,5 +824,5 @@ SCRIPT ENTRY AND PROFILING
     Parse arguments and select train or evaluation mode explicitly.
     IF profiling requested, create a profiler immediately before main.
     Disable profiler in a finally block and report cumulative time for the requested top count.
-    Preserve the original optional top-100 cumulative-time report capability.
-    CUDA synchronous debugging is an explicit diagnostic option, not a global import side effect.
+    Optionally export the top 100 operations by cumulative time.
+    Enable CUDA synchronous debugging through the diagnostic option.

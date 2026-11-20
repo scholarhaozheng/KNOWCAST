@@ -1,4 +1,5 @@
 MODULE models.gat
+FORMAT Pseudocode.
 PURPOSE Multihead graph attention with optional edge features.
 PAPER Section 4.8, Eq. (31); scoring and sparse-storage options are supplied parameters.
 INPUT x[N,I] or (x_source[N_src,I_src], optional x_target[N_dst,I_dst]).

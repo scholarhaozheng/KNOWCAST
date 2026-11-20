@@ -1,4 +1,5 @@
 MODULE run_PYGT_0917
+FORMAT Pseudocode.
 PURPOSE Independent pretraining of production or attraction estimation.
 PAPER Sections 4.3.1-4.3.2; Section 4.4 input-margin requirements.
 

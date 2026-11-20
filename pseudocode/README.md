@@ -1,6 +1,6 @@
 # Algorithm reading guide
 
-These five chapters explain the KNOWCAST method. The full per-file algorithms live in the original source directories as standalone `.pseudo` files; use [the repository guide](../PSEUDOCODE_GUIDE.md) and [42-file coverage inventory](../audit/SOURCE_COVERAGE.md) to navigate them.
+These five chapters explain the KNOWCAST method. Use the [repository guide](../PSEUDOCODE_GUIDE.md) and [46-module index](../validation/MODULES.md) to find the detailed `.pseudo` algorithms.
 
 ## Reading order
 
@@ -25,14 +25,14 @@ These five chapters explain the KNOWCAST method. The full per-file algorithms li
 | `d`, `t` | Day and within-day interval in paper equations |
 | `p`, `omega` | Feasible candidate path and directed network section |
 
-Each chapter declares its local tensor layout. A destination slot is not interchangeable with a real station identifier. Batch dimensions may be omitted in equations and restored by an implementation without changing the semantics.
+Each chapter defines its tensor layout. `RDS[m]` maps compressed slots to real station IDs for each origin. Equations may omit the batch axis.
 
-Chapter equations and conceptual algorithms use one-based mathematical destination labels where shown: retained `1..R`, residual `K=R+1`. The detailed standalone software contracts use retained array indices `0..R-1` and residual index `R`. Horizon label `lambda=1..lf` similarly maps to array index `h=lambda-1`; these are explicit index conversions, not different target definitions.
+Chapter equations use one-based destination labels: retained `1..R`, residual `K=R+1`. Array interfaces use retained slots `0..R-1` and residual index `R`. Horizon label `lambda=1..lf` maps to array index `h=lambda-1`.
 
-Procedures such as `GATRU`, `PRETRAIN_AUTOENCODER` and `AVAILABLE_AT` denote operations or contracts, not imported functions. Indentation expresses control flow. Assertions specify validity conditions; they do not indicate that tests or experiments have already run.
+Names such as `GATRU`, `PRETRAIN_AUTOENCODER` and `AVAILABLE_AT` denote algorithm operations. Indentation shows control flow; assertions state input conditions and invariants.
 
 ## Related specifications
 
-Paper-grounded steps cite sections or equations. Configurable choices are collected in [implementation parameters](../specs/implementation_parameters.md).
+Method steps cite their sections or equations. [Implementation parameters](../specs/implementation_parameters.md) lists configurable choices.
 
-Use the [equation crosswalk](../specs/paper_to_pseudocode.md), [reported settings](../specs/paper_settings.yaml) and [reproduction requirements](../REPRODUCIBILITY.md) alongside the algorithms.
+Use the [equation crosswalk](../specs/paper_to_pseudocode.md), [reported settings](../specs/paper_settings.yaml) and [data and configuration](../REPRODUCIBILITY.md) alongside the algorithms.

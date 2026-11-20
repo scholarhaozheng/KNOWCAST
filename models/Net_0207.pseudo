@@ -1,7 +1,7 @@
 MODULE models.Net_0207
+FORMAT Pseudocode.
 PURPOSE Build knowledge features and forecast compressed OD flows.
 PAPER Sections 3.2, 4.1-4.8 and 5.1.4; Eqs. (7)-(33).
-FORMAT Non-executable pseudocode; numerical architecture choices are input parameters.
 
 INPUT BatchBundle
     encoder_steps[l_h], decoder_steps[l_f], sample_ids[B], valid_mask[B].

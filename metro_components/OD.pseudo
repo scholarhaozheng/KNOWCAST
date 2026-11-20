@@ -1,4 +1,5 @@
 MODULE OD
+FORMAT Pseudocode.
 PURPOSE Store a directed real-station OD identity and conditional section annotations.
 PAPER Sections 4.5 and 4.7.
 

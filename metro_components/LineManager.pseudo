@@ -1,4 +1,5 @@
 MODULE LineManager
+FORMAT Pseudocode.
 PURPOSE Manage line sequences, adjacency state and line diagnostics.
 PAPER Sections 4.5–4.8.
 

@@ -1,4 +1,5 @@
 MODULE generating_domain_knowledge_no_DO_clean
+FORMAT Pseudocode.
 PURPOSE Prepare network, demand, pretrained knowledge and sample-aligned artifacts.
 PAPER Sections 4.2–4.6 and 5.1.1; Eqs. (2)–(27).
 

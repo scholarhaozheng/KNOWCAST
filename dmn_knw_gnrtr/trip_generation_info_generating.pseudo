@@ -1,4 +1,5 @@
 MODULE trip_generation_info_generating
+FORMAT Pseudocode.
 PURPOSE Station-district reconciliation, census cleaning, raster population extraction, feature fusion.
 PAPER Section 4.3.1 Equation (14); Section 5.1.2.
 
@@ -10,7 +11,7 @@ INPUT ARTIFACTS
     PATH_EDU: education table, legacy educated_level.csv.
     PATH_HOUSE: household table, legacy 02-06.csv.
     PATH_EMP: optional employment diagnostics, legacy 02-09.csv.
-    OUTPUT_ARTIFACT: legacy station_static_features_REAL.pkl name with revised schema metadata.
+    OUTPUT_ARTIFACT: station_static_features_REAL.pkl with its feature-schema metadata.
     coordinate_contract: longitude/latitude convention and original CRS.
     raster_contract: CRS, nodata value, band, units, spatial resolution, census vintage.
     district_aliases: reviewed cross-source district name table.
@@ -51,7 +52,7 @@ PROCEDURE load_automated_map
     REQUIRE columns 中文站名 and 所在地.
     IF either column is absent:
         REPORT actual column names and stop this load.
-        RETURN failure, not an empty successful station mapping.
+        RETURN failure.
     END IF
     TRIM station and district names.
     CLASSIFY rows with missing station names or district names as invalid.
@@ -120,7 +121,7 @@ PROCEDURE get_population_from_raster
     CREATE a point in the declared original CRS.
     READ the raster CRS and require a valid spatial transform.
     SELECT a documented metric or geodesic buffering method.
-    IMPLEMENTATION DECISION: local projected CRS and pixel-boundary weighting.
+    PARAMETERS Local projected CRS and pixel-boundary weighting.
     USE a CRS whose metric distance is valid at the study latitude.
     TRANSFORM the point into the selected buffer coordinate system.
     CONSTRUCT the circular 800-meter catchment.
@@ -254,7 +255,7 @@ PROCEDURE generate_station_level_socio_demographics
             ELSE:
                 REQUIRE source counts matching the selected age bounds or mark AgePct_work unresolved.
             END IF
-            RECORD that the paper does not identify exact working-age bounds from Eq.(14) alone.
+            PARAMETER Working-age bounds are supplied by feature_contract.
         ELSE:
             MARK all derived age shares missing.
         END IF
@@ -264,11 +265,11 @@ PROCEDURE generate_station_level_socio_demographics
         COMPUTE edu_senHigh_pct using the senior-high/technical-secondary definition.
         COMPUTE edu_tertiary_pct using junior-college-or-above categories.
         IF a source category cannot be mapped to the paper definition:
-            MARK the mismatch explicitly rather than relabeling it silently.
+            MARK the category mismatch.
         END IF
         MAP validated edu_primary_pct,edu_junMid_pct,edu_senHigh_pct,edu_tertiary_pct
             to canonical EduPct_primary,EduPct_junMid,EduPct_senHigh,EduPct_tertiary respectively.
-        PRESERVE unresolved category status through this mapping; aliases do not make missing values valid.
+        PRESERVE unresolved category status through the alias mapping.
         READ compatible household population and household count.
         IF household count is positive and definitions match:
             avg_household_size_i <- compatible_population / households.
@@ -279,7 +280,7 @@ PROCEDURE generate_station_level_socio_demographics
         APPLY the declared district-to-catchment allocation method.
         IF using district-wide proportions uniformly within the station catchment:
             LABEL this as an ecological estimation assumption.
-            STORE district share as the station estimate, not an individual measurement.
+            STORE the district share as the station-level estimate.
         END IF
         IF a catchment crosses district boundaries:
             REQUIRE the declared raster-weighted district combination rule.
@@ -297,12 +298,12 @@ PROCEDURE generate_station_level_socio_demographics
         CHECK category sums according to the source definitions.
         CHECK valid household size is positive.
         STORE units, denominators, geographic assumption, and census vintage.
-        STORE explicit canonical-to-legacy aliases instead of relying on downstream name guessing.
+        STORE the canonical-to-legacy alias map.
         APPEND the station record with its stable index.
     END FOR
     BUILD a station-indexed feature table.
     REINDEX it to the canonical network station order.
-    ADD missing records explicitly rather than compacting the station axis.
+    ADD missing records while preserving the station axis.
     REQUIRE the chosen downstream policy to resolve missing mandatory features.
     RETURN table and diagnostic report.
 END PROCEDURE
@@ -328,7 +329,7 @@ PROCEDURE main
         CALL generate_station_level_socio_demographics with all source paths.
         CLOSE the raster even when a station extraction fails.
         ON raster absence:
-            REPORT the missing input; do not create synthetic population values.
+            REPORT the missing population input.
         ON unexpected extraction error:
             REPORT sanitized diagnostics and mark the stage failed.
     STAGE 4: VALIDATE AND SAVE.

@@ -1,21 +1,21 @@
 # Path choice, service features, and flow assignment
 
-Source: [published paper](../docs/assets/knowcast-paper.pdf), Sections 4.5-4.7, Eqs. (21)-(30); autoencoder training also follows Section 4.4.3. The reported utility initialization is in Section 5.1.4. Section and equation numbers below refer to that paper.
+Sections 4.5–4.7 of the [paper](../docs/assets/knowcast-paper.pdf) define path utility, service features and assignment in Eqs. (21)–(30). Autoencoder training follows §4.4.3; utility initialization is reported in §5.1.4.
 
 ## Inputs and indexing
 
 - `t` denotes a target interval. For forecasting, every service input at `t` must have been known, announced, or forecastable at the prediction origin `t0` (Section 3.2).
 - `V` is the station set, `Omega` the directed section set, and `Lines` a fixed ordered list of metro lines.
 - `RDS[m, s]` maps retained compressed slot `s` of origin `m` to its real destination. There are `R` retained slots plus one residual slot. The map is fitted on training data and then fixed (Section 4.2.2).
-- `P[od, t]` contains distinct feasible candidate paths for a real OD pair at interval `t`. The candidate-path generation procedure is an abstract primitive; this document does not assume a fixed path count.
+- `P[od, t]` contains distinct feasible candidate paths for a real OD pair at interval `t`. The configured path-generation procedure determines the candidate set.
 - `u[p, omega]` is 1 when path `p` traverses directed section `omega`, and 0 otherwise. Reverse directions are distinct.
-- `K7[t, eta, mu, line]` is departure frequency, not a headway duration. Invalid sections and sections not served by that line have zero frequency (Section 4.5.1).
+- `K7[t, eta, mu, line]` is departure frequency. Invalid sections and sections not served by that line have zero frequency (Section 4.5.1).
 
-This chapter uses one-based mathematical slot and horizon labels, as in the equations. The standalone `.pseudo` software contracts use zero-based arrays: retained slots `0..R-1`, residual `R`, horizon index `h=lambda-1`. Convert labels explicitly when crossing that boundary. Unknown service information is distinct from known zero service; the detailed modules preserve raw frequency, encoder frequency and known-status fields separately.
+Chapter equations use one-based labels. Array interfaces use retained slots `0..R-1`, residual `R` and horizon `h=lambda-1`. Service records store raw frequency, normalized encoder frequency and known-status fields; a known service closure has raw frequency zero.
 
 ## Utilities and probabilities remain differentiable
 
-The full model trains utility coefficients through the OD forecasting objective. The normalization itself has no trainable parameters. The fixed-utility ablation freezes the coefficients explicitly (Section 5.3), rather than changing the meaning of Softmax.
+The OD forecasting objective trains utility coefficients and knowledge encoders. Softmax normalizes the utilities. The fixed-utility ablation freezes `beta` (Section 5.3).
 
 ```text
 INITIALIZE PATH-CHOICE PARAMETERS
@@ -23,8 +23,8 @@ INITIALIZE PATH-CHOICE PARAMETERS
     beta_transfer <- -0.573 per transfer
     record the feature definitions and units associated with these coefficients
     mark beta trainable for the full model
-    if reproducing the fixed-utility ablation, explicitly freeze beta
-    do not initialize additional, undocumented utility coefficients by assumption
+    freeze beta for the fixed-utility ablation
+    initialize any configured additional coefficients from their parameter specification
 
 PATH_CHOICE(t, service_snapshot, candidate_paths, section_features, beta)
     for each real retained OD pair od:
@@ -32,7 +32,6 @@ PATH_CHOICE(t, service_snapshot, candidate_paths, section_features, beta)
         if P is empty:
             apply the declared fail or unassignable-demand policy
             record the empty set and continue to the next OD if the policy permits
-            do not reach MAX or normalize an empty candidate set
 
         for each p in P:
             for each documented utility feature phi:
@@ -59,11 +58,11 @@ PATH_CHOICE(t, service_snapshot, candidate_paths, section_features, beta)
     return probability, section_probability, the feasible sets and incidences
 ```
 
-Subtracting the maximum utility is a numerical implementation choice that leaves Eq. (23) unchanged. Inputs to a forward pass are fixed observations or plans, while `beta` and downstream encoders remain trainable. Feasibility is checked before normalization: a service closure must not leave a partially traversable route masquerading as a valid origin-to-destination path.
+Subtracting the maximum utility preserves Eq. (23) and stabilizes exponentiation. Feasible paths traverse complete origin-to-destination routes under the target-time service conditions. The forward pass retains gradients from probabilities to `beta` and the encoders.
 
 ## Two autoencoder families provide path and service features
 
-Section 4.6 defines an OD-specific section-probability matrix and a line-specific frequency matrix. It does not replace the directed station-pair-by-line service tensor with a station-only headway table.
+Section 4.6 defines an OD-specific section-probability matrix and a line-specific frequency matrix. Service input retains both directed station-pair and line axes.
 
 ```text
 CONSTRUCT SERVICE MATRICES(t, section_probability, K7)
@@ -114,16 +113,13 @@ JOINT FORECASTING TRAINING
     update those encoders and trainable utility coefficients through the
         forecasting objective, together with the core predictor
     retain the separately pre-calibrated gravity deterrence parameter as fixed
-    do not silently detach probabilities or freeze the feature encoders
-    do not claim an additional reconstruction penalty during joint training
-        unless a separate implementation decision explicitly introduces it
 ```
 
-`F_KI` contains knowledge features only. The primary OD values are appended later when constructing station features (Section 4.8). The distribution embedding from Section 4.4 is a separate augmentation and is not silently substituted for either family above.
+`F_KI` contains path and service features. Node-feature construction appends primary OD values and the separate distribution embedding.
 
 ## Assign the forecast using probabilities for the same interval
 
-For prediction origin `t0` and horizon index `lambda = 1, ..., l_f`, the target interval is `t = t0 + lambda - 1`. Use the same model parameter state and target-time service snapshot for its OD forecast and assignment probabilities. Historical path probabilities or a probability array from the first available timestamp are not interchangeable with these quantities.
+For prediction origin `t0` and horizon `lambda = 1, ..., l_f`, target interval `t = t0 + lambda - 1`. OD forecasts and assignment probabilities use the same model state and target-time service inputs.
 
 ```text
 ASSIGN_FORECAST(t0, lambda, predicted_compressed_OD, probability,
@@ -155,7 +151,6 @@ ASSIGN_FORECAST(t0, lambda, predicted_compressed_OD, probability,
                         [Eq. (29)]
 
         exclude residual slot R + 1 from path and section assignment
-        do not interpret this aggregate as a real destination
 
     return PathFlow, LinkFlow
 
@@ -166,18 +161,20 @@ AGGREGATE SECTION ESTIMATES(evaluation_prediction_origins)
             [Eq. (30)]
 ```
 
-These section flows cover explicitly retained OD demand. Section 5.5 describes additional compensation, temporal dispersion and headway conversion for comparison with sampled train loads; Eqs. (28)-(30) alone do not implement that operational validation. No path-level ground-truth labels are implied.
+These section flows cover retained OD demand. Section 5.5 then applies compensation, temporal dispersion and headway conversion to compare estimated train loads with observations.
 
-## Implementation decisions that remain explicit
+## Configuration
 
-| Detail | Paper-grounded constraint | Decision required for an executable implementation |
+| Detail | Method | Configuration |
 | --- | --- | --- |
 | Candidate paths | Eqs. (21)-(24) normalize within the available paths for each OD pair | Path enumeration, truncation, deduplication, closure filtering and the empty-set policy |
 | Station and transfer attributes | Section 5.1.4 supplies the two initial disutilities and their units | Exact endpoint-counting conventions and transfer detection; preserve those conventions in preprocessing |
-| Additional service effects on utility | Sections 4.5.1-4.5.2 permit time-varying path characteristics | Specify any extra attributes and coefficients; none are invented here |
+| Additional service effects on utility | Sections 4.5.1-4.5.2 permit time-varying path characteristics | Additional attributes, coefficients and units |
 | Path/service autoencoders | Section 4.6 requires separate reconstruction pretraining and subsequent encoder fine-tuning | Layer structures, latent dimensions, sharing across ODs or lines, normalization and optimizer settings |
-| Pretraining corpus | Section 4.6 describes the matrix families but does not fully define corpus construction | This reconstruction uses training-only fitting; document utility state and snapshot sampling used during pretraining |
-| Nonnegative flow outputs | Section 4.7 interprets predictions as flow volumes | Declare the output parameterization or any clipping rule; the paper equations do not specify a clipping operation |
-| Disconnected and same-station OD cases | Assignment requires a meaningful candidate path set | Declare their treatment consistently with demand targets; do not invent a network traversal |
+| Pretraining corpus | Path- and service-matrix families in Section 4.6 | Training-only corpus, utility state and snapshot sampling |
+| Nonnegative flow outputs | Section 4.7 interprets predictions as flow volumes | Output parameterization or clipping rule shared by evaluation and assignment |
+| Disconnected and same-station OD cases | Assignment requires a meaningful candidate path set | Demand-target treatment and unassignable-flow accounting |
 
-Mathematical checks for any later implementation: candidate probabilities sum to one for each OD with a nonempty feasible set; excluded paths have zero probability; path flows sum to the retained OD prediction; section contributions use directed incidences; line embeddings are reused at the same interval; and the residual slot never receives a fabricated route.
+## Invariants
+
+For each nonempty OD path set, probabilities sum to one and assigned path flows sum to retained demand. Excluded paths contribute zero. Section aggregation uses directed incidence, line embeddings share the same target interval, and residual demand stays outside direct path assignment.

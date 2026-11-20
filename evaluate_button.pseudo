@@ -1,15 +1,15 @@
 MODULE evaluate_button
-EDITION paper-aligned reconstruction; NON-EXECUTABLE PSEUDOCODE
+FORMAT Pseudocode.
 PURPOSE restore a declared checkpoint, evaluate it once, and export aligned predictions
 PAPER Section 5.1.3; Eqs. (34)-(37)
 DEPENDENCIES train_evaluate_functions.pseudo; lib/utils_CUROP.pseudo; models/Net_0207.pseudo
 
 INPUT CONTRACT
     Invocation supplies config_filename and checkpoint_path explicitly.
-    An evaluation run can use a selected validation checkpoint, not the last unsaved model.
+    Evaluation loads the checkpoint selected by validation.
     Artifact manifest identifies station order, RDS, residual shares, feature schema and scaler.
-    User-supplied seed is recorded; legacy seed 1234 is not asserted as a paper setting.
-    No model initialization after checkpoint restore may overwrite loaded parameters.
+    Record the configured random seed.
+    Initialize model structure before restoring checkpoint parameters.
 
 PROCEDURE read_cfg_file(filename,invocation=ABSENT)
     INPUT filename; optional normalized checkpoint-evaluation invocation.
@@ -33,7 +33,7 @@ PROCEDURE StepLR2.__init__(optimizer,milestones,gamma=0.1,last_epoch=-1,min_lr=2
     PARAMETERS milestones, gamma=0.1, last_epoch=-1, min_lr=2.0e-6.
     OUTPUT initialized scheduler with restored epoch and base group rates.
         Validate optimizer groups, nonnegative milestones and allowed rate ranges.
-        Store the provided last_epoch rather than dropping it.
+        Store the provided last_epoch.
         Delegate state construction to the common StepLR2 contract.
         Record scheduling convention and base group rates in state.
 END PROCEDURE
@@ -53,10 +53,10 @@ PROCEDURE init_weights(module)
     PARAMETERS None.
     OUTPUT updated state of eligible newly constructed layers.
     Retain this legacy initialization helper for callers constructing a NEW model.
-    It must never run after loading a trained checkpoint for evaluation.
+    Run this initialization before loading the evaluation checkpoint.
     IF module explicitly exposes a trainable dense Linear weight:
         Initialize weight with a declared Xavier-uniform gain.
-        Initialize bias using a declared bias policy; do not assume one from the paper.
+        Initialize bias using the configured bias policy.
     ELSE IF module is a supported graph convolution:
         Invoke its own reset_parameters contract covering every projection and attention term.
     ELSE:
@@ -90,13 +90,13 @@ PROCEDURE main(args)
     checkpoint_path <- args.checkpoint_path when supplied, otherwise cfg.model.save_path.
     REQUIRE checkpoint_path and its provenance manifest both exist.
     requested_split <- args.requested_split when supplied, otherwise cfg.evaluation.requested_split.
-    REQUIRE requested_split in {train,val,test}; no unspecified default split is invented.
+    REQUIRE requested_split in {train,val,test}.
     log_dir <- _get_log_dir(cfg,purpose='evaluation',resume_run_id=ABSENT).
     logger <- utils.get_logger(log_dir,'evaluate_button','info.log',cfg.log_level,write_to_file=true).
     Record start timestamp, pseudocode edition ID and invocation parameters.
     Seed stochastic libraries only when cfg.seed is supplied; record deterministic policy.
     device <- selected available device according to an explicit CPU/GPU fallback policy.
-    Log selected device without claiming numerical equivalence across hardware.
+    Log the selected device.
     state <- LOAD_CHECKPOINT_WITH_MANIFEST(checkpoint_path,device).
     checkpoint_manifest <- state.manifest.
     saved_scaler <- READ_VERIFIED_ARTIFACT(checkpoint_manifest.od_scaler_reference).
@@ -121,7 +121,7 @@ PROCEDURE main(args)
     output_dim <- cfg.model.output_dim.
     REQUIRE these agree with the checkpoint manifest; validate dataset agreement after loading.
     flags <- normalize component switches from the legacy and current config schemas.
-    Reject conflicting legacy/current names rather than choosing an arbitrary value.
+    Reject conflicting legacy/current names.
     PHASE 2: Build the graph and restore the requested data split.
     graph <- utils.BUILD_GRAPH_BUNDLE(cfg,cfg.artifacts,device).
     edge_index <- graph.edge_index; edge_attr <- graph.edge_attr.
@@ -130,7 +130,7 @@ PROCEDURE main(args)
         scaler_axis=checkpoint_scaler.axes, options=cfg.data with training_mode=false,
         fit_scaler=false, scaler=checkpoint_scaler, frequency_scaler=checkpoint_frequency_scaler,
         phases=[requested_split], component_context=component_context).
-    REQUIRE frozen training scaler; never fit it on test data in this entry point.
+    REQUIRE the frozen training-fitted scaler.
     Check dataset includes every expected target sample and alignment identifier.
     Bind verified immutable artifact references under cfg.artifacts.
     Bind cfg.artifacts.od_scaler to utils.StandardScaler_Torch(checkpoint_scaler.mean,
@@ -183,7 +183,7 @@ PROCEDURE LOAD_CHECKPOINT_WITH_MANIFEST(path,device)
     Load tensors using an explicit device map, permitting CPU-only evaluation.
     Distinguish bare legacy parameter dictionaries from full checkpoint bundles.
     IF bare legacy parameters:
-        REQUIRE a separately supplied manifest; missing provenance is not auto-inferred.
+        REQUIRE the supplied artifact manifest.
     IF training bundle:
         Extract model_state and immutable artifact references.
         Ignore optimizer/scheduler state during read-only evaluation.

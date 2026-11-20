@@ -1,6 +1,6 @@
 # Paper to pseudocode crosswalk
 
-Source: the [published article](../docs/assets/knowcast-paper.pdf). Page numbers refer to its printed 1–37 pagination. This map traces method descriptions; it does not certify a historical implementation or experimental reproduction.
+Page numbers refer to the printed 1–37 pagination of the [published article](../docs/assets/knowcast-paper.pdf).
 
 | Paper location | Method requirement | Pseudocode chapter |
 | --- | --- | --- |
@@ -19,13 +19,13 @@ Source: the [published article](../docs/assets/knowcast-paper.pdf). Page numbers
 | §5.2–5.3, pp.23–29, Tables 3–6 | Baselines and ablation results reported in the paper | [05 · Evaluation](../pseudocode/05_training_and_evaluation.md) |
 | §5.4–5.6, pp.29–33, Tables 7–8 | Runtime, indirect load assessment and task-setting sensitivity | [05 · Evaluation](../pseudocode/05_training_and_evaluation.md) |
 
-## Decisions that remain open
+## Configuration
 
-An implementation must record choices absent from the paper, including exact window and batch settings for the main experiment, neural layer layouts, calibration and IPF stopping settings, missing historical-reference handling and original normalization/optimization details. Each chapter and the settings file identify more specific gaps. Do not fill an unknown from the superseded source snapshot without separate evidence.
+[Paper settings](paper_settings.yaml) lists reported numerical values. [Implementation parameters](implementation_parameters.md) covers window and batch sizes, layer layouts, calibration, IPF stopping rules, historical-reference handling, normalization and optimization choices supplied by configuration.
 
-## Full per-file algorithm locations
+## Algorithm modules
 
-The chapter links above are conceptual summaries. The standalone repository algorithms contain the detailed source-level reconstruction:
+The chapters introduce the method; the following modules give the detailed procedures:
 
 | Equations / responsibility | Primary standalone files |
 | --- | --- |
@@ -44,8 +44,8 @@ The chapter links above are conceptual summaries. The standalone repository algo
 | Eqs. (31)-(33), attention and gated recurrence | [GAT](../models/gat.pseudo), [GATRU](../models/GATRUCell.pseudo) |
 | Eqs. (34)-(37), metrics and horizon aggregation | [Metrics](../lib/metrics.pseudo), [evaluation](../train_evaluate_functions.pseudo) |
 | Table 2, search and selected settings | [Search](../bayes_opt.pseudo), [reported settings](paper_settings.yaml) |
-| Tables 3-7 and §5.6, baselines, ablations, efficiency and task sensitivity | [Added experiment protocol](../experiments/ablation_and_sensitivity.pseudo) |
-| §5.5 and Table 8, indirect dynamic train-load assessment | [Added operational assessment](../experiments/operational_load_assessment.pseudo) |
+| Tables 3-7 and §5.6, baselines, ablations, efficiency and task sensitivity | [Experiment protocol](../experiments/ablation_and_sensitivity.pseudo) |
+| §5.5 and Table 8, indirect dynamic train-load assessment | [Operational assessment](../experiments/operational_load_assessment.pseudo) |
 | End-to-end artifact preparation and lifecycle | [Pipeline](../generating_domain_knowledge_no_DO_clean.pseudo), [shared contracts](interface_contracts.md) |
 
-The [source inventory](../audit/SOURCE_COVERAGE.md) additionally covers original support utilities and legacy variants that are not separate paper equations.
+The [module index](../validation/MODULES.md) also lists supporting data, network and plotting utilities.

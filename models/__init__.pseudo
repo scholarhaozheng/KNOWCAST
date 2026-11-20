@@ -1,4 +1,5 @@
 MODULE models
+FORMAT Pseudocode.
 PURPOSE Package containing the OD forecaster, graph recurrent cells and graph operators.
 PAPER KNOWCAST model algorithms; each component names its relevant equations.
 INPUT None.

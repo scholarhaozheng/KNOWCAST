@@ -1,4 +1,5 @@
 MODULE experiments.operational_load_assessment
+FORMAT Pseudocode.
 PURPOSE Convert retained-OD forecasts to section flows and compare aligned train loads.
 PAPER Eqs. (28)-(30); Section 5.5; Table 8.
 CONTRACT specs/interface_contracts.md; specs/implementation_parameters.md

@@ -1,4 +1,4 @@
-"""Independent Gaussian interval-weight examples for the operational specification."""
+"""Gaussian interval weights, causal-tail policies, and flow-conservation examples."""
 import argparse
 import json
 import math
@@ -73,8 +73,8 @@ def main():
         assert all(x >= 0 for x in values)
     checks.append({"name": "entry_quadrature_and_mass_ledger", "status": "passed"})
 
-    report = {"artifact_kind": "independent_formula_reference_checks", "executed_pseudocode": False,
-              "numerical_oracles_passed": len(checks), "checks": checks}
+    report = {"artifact_kind": "temporal_kernel_formula_examples",
+              "numerical_examples_passed": len(checks), "checks": checks}
     rendered = json.dumps(report, indent=2)
     if args.output:
         args.output.write_text(rendered + "\n", encoding="utf-8")

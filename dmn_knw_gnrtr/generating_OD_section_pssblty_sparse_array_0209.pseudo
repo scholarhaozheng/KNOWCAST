@@ -1,4 +1,5 @@
 MODULE generating_OD_section_pssblty_sparse_array_0209
+FORMAT Pseudocode.
 PURPOSE Produce time-indexed candidate attributes, exact binary incidence and optional CP storage.
 PAPER Eqs. (21)–(24); CP compression is an optional storage adapter.
 

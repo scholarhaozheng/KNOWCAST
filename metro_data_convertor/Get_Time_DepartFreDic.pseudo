@@ -1,4 +1,5 @@
 MODULE Get_Time_DepartFreDic
+FORMAT Pseudocode.
 PURPOSE Expand timetable rows into dated, directed, line-specific service records.
 PAPER Section 4.5.1 K7 and Section 4.6 Eq. (26).
 

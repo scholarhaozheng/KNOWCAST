@@ -1,4 +1,5 @@
 MODULE models.GGRUCell
+FORMAT Pseudocode.
 PURPOSE Legacy relation-mixture recurrent alternative.
 PAPER Section 4.8 uses GATRU; this alternative has a retained-state gate.
 INPUT Node features[V_total,D], relation weights[E,num_relations], hidden[V_total,h].

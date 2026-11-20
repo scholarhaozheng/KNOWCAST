@@ -1,12 +1,12 @@
 # KITP, GATRU, and sequence forecasting
 
-Source: [published paper](../docs/assets/knowcast-paper.pdf), Section 3.2 and Fig. 3; Sections 4.1-4.8 and Fig. 4. The main references are Eqs. (7)-(13) for unfinished-trip allocation and fusion, Eqs. (17)-(19) for the training objective, and Eqs. (31)-(33) for GATRU. Path and service primitives are expanded in [03_path_choice_and_service.md](03_path_choice_and_service.md).
+Section 3.2 and Fig. 3 of the [paper](../docs/assets/knowcast-paper.pdf) define sequence forecasting; Sections 4.1–4.8 and Fig. 4 define KITP. This chapter uses Eqs. (7)–(13) for allocation and fusion, (17)–(19) for the objective and (31)–(33) for GATRU. [Path and service features](03_path_choice_and_service.md) supply the assignment operations.
 
 ## Feature and time contracts
 
 The forecast origin is `t0`. Historical inputs cover `t0 - l_h` through `t0 - 1`; targets cover `t0` through `t0 + l_f - 1`. Static inputs include the pre-calibrated distribution preference parameter `K3` and utility initialization `K5`. Dynamic inputs `K2`, `K4`, `K6`, and `K7` concern trip generation, distribution, path attributes, and service conditions, respectively (Section 3.2).
 
-For a future target interval, these dynamic inputs must be available at `t0` as known plans, announced conditions, or forecasts. Realized future AFC data and subsequently observed service changes are not valid inference inputs. Ground-truth OD values have the separate, explicit teacher-forcing role during training.
+Future knowledge contains plans, announced conditions or forecasts available at `t0`. During training, ground-truth OD enters through the separate teacher-forcing input.
 
 The conceptual formulas here use one-based retained-slot/horizon labels. Standalone array contracts use retained slots `0..R-1`, residual `R`, and horizon index `h=lambda-1`. The [shared interfaces](../specs/interface_contracts.md) define the explicit conversion and representation tags.
 
@@ -15,7 +15,7 @@ KNOWLEDGE_AT(t, information_available_at_t0)
     select the time-aligned K2, K4, K6, K7 allowed by the information cutoff
     resolve complete auxiliary_context_by_task windows for production and attraction
     preserve auxiliary lengths, checkpoint/scaler/graph IDs and target_offset
-    require every context input available at t0; do not replace a sequence with one K2 row
+    select complete context sequences with inputs available at t0
     generation_estimates <- INDEPENDENT_PRETRAINED_GENERATION_MODEL(
         full auxiliary covariate windows including K2, target_offset)
     distribution_embedding <- DISTRIBUTION_KNOWLEDGE(
@@ -44,17 +44,16 @@ BUILD_NODE_FEATURES(primary_compressed_OD, knowledge, fixed_RDS)
 
     preserve the fixed origin-specific destination order
     retain the residual OD value as an aggregate demand channel
-    never assign the residual slot a fictitious real-OD knowledge block
     return node_feature
 ```
 
-`ALIGNED_DISTRIBUTION_FEATURES` exposes the distribution augmentation from Section 4.4. The paper fixes its role but does not fully specify every reshape and projection used to combine it with the station-level learner; those choices must be documented. Preprocessing normalization, when used, must preserve this indexing and provide an inverse transform to flow units.
+`ALIGNED_DISTRIBUTION_FEATURES` maps the distribution embedding to station features using the configured reshape or projection. Normalization preserves station and retained-destination order, with an inverse transform to passenger counts.
 
 ## GATRU follows the paper's update-gate convention
 
-The directed graph defines feasible attention neighborhoods, not fixed propagation weights. Attention is normalized over allowed incoming neighbors and the node itself (Section 4.8, Eq. (31)). The scoring function and activation remain abstract where the paper does not prescribe their implementation.
+The directed graph defines allowed attention neighborhoods. Eq. (31) normalizes learned attention over incoming neighbors and the node itself. Configuration supplies the scoring function and activation.
 
-For one unbatched interval, let the node input be `[N, d_in]`, the recurrent width be `h`, the head count be `K_head`, and each head width be `d_head`. The concatenated attention features have shape `[N, K_head * d_head]`. The reset gate `r`, update gate `z`, candidate state, previous state, and new state each have shape `[N, h]`; their trainable projections must produce that width. These symbolic shape constraints make Eqs. (31)-(33) well-defined without assigning undisclosed numerical dimensions.
+For one interval, node inputs have shape `[N,d_in]`. With `K_head` heads of width `d_head`, concatenated attention features have shape `[N,K_head*d_head]`. The recurrent width is `h`; reset and update gates, candidate state, previous state and new state all have shape `[N,h]`.
 
 ```text
 GATRU_STEP(X, H_previous, directed_graph, parameters)
@@ -81,11 +80,11 @@ GATRU_STEP(X, H_previous, directed_graph, parameters)
     return the collection H_new for all nodes [Eq. (33)]
 ```
 
-Here `z` weights the candidate state. Libraries that use the opposite naming convention for an update gate require an explicit conversion. The recurrence above follows Eq. (32) directly.
+In Eq. (32), `z` weights the candidate state and `1-z` weights the preceding state.
 
-## The encoder actually fuses all three unfinished-trip references
+## Fuse the three unfinished-trip references
 
-Section 4.2.4 requires previous-day, previous-week, and previous-month references. A month offset means the same calendar day in the preceding month, not an assumed 30-day shift. The compressed destination map is fixed using the training period (Sections 4.2.2-4.2.3).
+Section 4.2.4 uses previous-day, previous-week and previous-calendar-month references. The destination map is fitted on the training period and shared across splits.
 
 ```text
 UNFINISHED_ALLOCATIONS(t, unfinished_counts, historical_reference_OD)
@@ -150,7 +149,7 @@ ENCODE_HISTORY(t0, history, information_available_at_t0)
     return encoder_context
 ```
 
-The fusion above uses the final branch states as written in Section 4.2.4. `ENCODER_FEATURE_INTERFACE` must connect the primary finished and allocated OD inputs and the knowledge augmentations to the predictor. It must implement the slot alignment described above. A separately declared raw-reference adapter may perform unfinished allocation before this interface, but it is mutually exclusive with the standard loader-allocated representation; normalized allocations must never be allocated or normalized again. The paper does not completely specify branch-specific feature reuse or a multilayer state interface; this pseudocode does not invent those tensor-wiring choices. It does require all three reference branches to contribute through Eqs. (10)-(13), rather than merely computing unused tensors.
+Fusion uses the final branch states from Section 4.2.4. `ENCODER_FEATURE_INTERFACE` aligns finished OD, unfinished allocations and knowledge features by origin and retained destination. The standard loader supplies transformed allocations; a raw-reference adapter instead performs allocation before this interface. Configuration selects one representation and defines branch-specific feature reuse and the encoder-to-decoder state mapping.
 
 ## Decoder steps preserve dynamic knowledge while removing unfinished branches
 
@@ -183,12 +182,10 @@ FORECAST(t0, mode, history, known_information, optional_training_targets)
                 previous_OD_input <- ENCODE_OD_INPUT(prediction[lambda])
                                      [Autoregressive inference: Section 3.2]
 
-    do not request future unfinished observations or future realized OD targets
-        in inference mode
     return prediction, path_flow, section_flow
 ```
 
-`ENCODE_OD_INPUT` denotes the required representation conversion, not repeated normalization of already normalized predictions. `OD_READOUT` is an abstract trainable projection to the compressed OD target. No scheduled-sampling schedule, output activation, or extra recurrent layer is inferred from the retired research scripts.
+`ENCODE_OD_INPUT` converts between the prediction and recurrent-input representations using their transform IDs. `OD_READOUT` projects the recurrent state to compressed OD. Configuration supplies its structure and output treatment.
 
 ## Training connects the stated losses to the full forward graph
 
@@ -231,11 +228,11 @@ TRAIN THE DECLARED FULL MODEL
     evaluate the selected model autoregressively on the held-out test split
 ```
 
-The complete generation-loss and distribution procedures belong to their corresponding modules; the primitives here must preserve their stated constraints. Trainable encoders must receive gradients through their forecasting features. Independent generation estimates and the pre-calibrated gravity deterrence parameter are not silently redefined as additional jointly trained neural parameters.
+Generation-loss and distribution procedures follow their respective modules. Forecasting gradients update the predictor, gating, active utility parameters and feature encoders. Gravity `zeta` stays fixed; the generation-model configuration selects its main-training parameter policy.
 
-## Implementation decisions that remain explicit
+## Configuration
 
-| Detail | Paper-grounded constraint | Decision required for an executable implementation |
+| Detail | Method | Configuration |
 | --- | --- | --- |
 | Attention score and activation | Eq. (31) uses multi-head, neighborhood-normalized attention | Scoring function, activation, head count, dimensions and regularization |
 | Attention-based gating | Eqs. (10)-(12) apply positional encoding, produce three aligned gate blocks and use sigmoid weighting | Position axis, encoding construction, attention layout, parameter sharing and gate projection |
@@ -243,8 +240,10 @@ The complete generation-loss and distribution procedures belong to their corresp
 | Node features | Sections 4.1, 4.4 and 4.8 require OD, distribution, path and service information | Tensor layouts and projections while preserving destination order and residual semantics |
 | Initial zero input | Section 3.2 specifies a zero OD matrix at the first decoder step | Its relation to any model-input normalization |
 | Forecast readout | Section 3.2 requires compressed OD predictions at every horizon | Projection structure, nonnegative output treatment and representation conversion |
-| Missing historical dates | Section 4.2.3 uses previous calendar month, week and day | Missing-date policy; the zero-row fallback does not define an absent-date policy |
-| Teacher forcing | Section 3.2 feeds the preceding ground-truth OD during training | Any proposed alternative must be labeled a deviation, rather than presented as the published method |
-| Optimization and checkpoints | Sections 4.3 and 5.1.4 specify the loss and validation-based tuning | Exact epoch indexing, seeds, batch sizes, stopping and checkpoint rules needed for reproducibility |
+| Missing historical dates | Section 4.2.3 uses previous calendar month, week and day | Separate policies for missing dates and observed zero rows |
+| Teacher forcing | Section 3.2 feeds the preceding ground-truth OD during training | Training mode uses the preceding target; inference mode uses the preceding prediction |
+| Optimization and checkpoints | Sections 4.3 and 5.1.4 specify the loss and validation-based tuning | Formula epoch origin, seeds, batch sizes, stopping and checkpoint rules |
 
-Checks for a future implementation should verify sensitivity to each unfinished-reference input, use of target-time knowledge at every decoder step, absence of future realized inputs in inference, nonzero gradient paths through enabled knowledge modules, and identical destination and time indexing between OD forecasts and assignment outputs. These are specification checks, not claims that this non-executable reconstruction has reproduced the paper's numerical results.
+## Invariants
+
+All three unfinished branches contribute to fusion. Every decoder step uses target-time knowledge available at the forecast origin. Active knowledge modules receive forecasting gradients. OD outputs and assignment records share destination IDs, target times and model state.

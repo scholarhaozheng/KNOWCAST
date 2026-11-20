@@ -1,10 +1,10 @@
 MODULE models.OD_Net_att
+FORMAT Pseudocode.
 PURPOSE Recurrent encoder branches, unfinished-demand fusion and OD decoder.
 PAPER Sections 3.2, 4.2.4 and 4.8; Eqs. (9)-(13), (31)-(33).
 INPUT Graph-batched features with V_total=B*N nodes and explicit sample segmentation.
 OUTPUT Hidden states[V_total,h] and OD readout[B,N,R+1].
 PARAMETERS Feature widths, recurrent layers, learner profile, gating_spec and readout.
-FORMAT Non-executable pseudocode; supplied gating dimensions specify an implementation of Eq. (10).
 
 CLASS ODNet_att
     PARAMETERS Finished/day/week/month cells, upper encoder layers, decoder layers and readout.

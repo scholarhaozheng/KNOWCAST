@@ -1,5 +1,5 @@
 MODULE visualization_tools.plot_graph
-STATUS non-executable diagnostic plotting specification.
+FORMAT Pseudocode.
 PAPER_MAP: Section 5.2 convergence diagnostics; Sections 5.3 and 5.6; metric Equations (34)-(37).
 INPUT Numerical source data, checkpoint identity and metric definitions accompany each plot.
 GLOBAL INPUT CONTRACT:
@@ -8,18 +8,17 @@ GLOBAL INPUT CONTRACT:
     Utility history distinguishes optimizer-step samples from end-of-epoch samples.
     OD tensors use [sample,horizon,origin,compressed_destination_slot].
     Compressed slots map through fixed RDS[origin,slot].
-    The last slot is the residual aggregate and is never mislabeled as one destination station.
+    The last slot represents the residual destination aggregate.
     Prediction bundles contain checkpoint_id, split, sample_ids, target_times, and masks.
     Truth bundles contain the same ordered identifiers and target-time semantics.
     Values are original passenger-flow counts unless a stored transform is explicitly supplied.
     Metrics carry their definition, reduction order, and ratio-versus-percent unit.
-    The plotter cannot recover any of these contracts from array length alone.
+    Input metadata supplies these axis, identity and metric contracts.
 GLOBAL OUTPUT CONTRACT:
     Figure artifact in the requested export format.
     Sidecar metadata naming source artifacts, units, selections, and checkpoint identity.
     Export receipt with destination and validation status.
-    File outputs belong to the supplied diagnostic directory, never a source workbook-as-directory.
-    No plot is labeled an independently reproduced paper result without separate evidence.
+    Write plot outputs to the supplied diagnostic directory.
 
 PROCEDURE plot_step_points_from_excel
     INPUT filepath, columns, step, output_pdf.
@@ -47,7 +46,7 @@ PROCEDURE plot_step_points_from_excel
     LABEL the station coefficient with its station-count feature convention.
     LABEL the transfer coefficient with its transfer-count feature convention.
     IF coefficients have incomparable units:
-        USE separate aligned panels rather than an unexplained common scale.
+        USE separate aligned panels.
     END IF
     ADD a legend identifying each coefficient and any initial prior reference.
     LABEL x as the actual index_kind and y as the corresponding utility coefficient.
@@ -159,7 +158,7 @@ PROCEDURE plot_od_losses
     ELSE IF selected by absolute change magnitude:
         LABEL that quantity as change magnitude, not improvement.
     END IF
-    STATE that selected OD illustrations are post-hoc examples, not all-OD averages.
+    LABEL selected OD plots as post-hoc pair illustrations.
     EXPORT the figure and selected-pair identity table.
     VERIFY no pair label or compressed index has changed during plotting.
     RETURN export receipt.
@@ -172,7 +171,7 @@ PROCEDURE plot_od_time_series
     REQUIRE one declared selected-checkpoint prediction bundle.
     REQUIRE prediction tensor shape [B,L_f,N,K].
     REQUIRE truth tensor and observation masks use matching axes.
-    JOIN truth and predictions by sample_id rather than truncating both to the shorter length.
+    JOIN truth and predictions by sample_id.
     CHECK every joined sample's forecast origin and target timestamp array.
     REJECT missing, duplicate, or mismatched samples unless an explicit subset is requested.
     EXCLUDE padded batch rows using the genuine-sample validity mask.
@@ -233,5 +232,5 @@ MODULE_FLOW:
     The training exporter calls these procedures only after its numerical artifacts are sealed.
     All requested formats, font choices, canvas sizes, and DPI values are caller-supplied decisions.
     Export validation checks nonempty files, complete legends, unclipped labels, and correct units.
-    Plotting errors are reported as diagnostic-export failures rather than model-training successes.
+    Report plotting errors as diagnostic-export failures.
     This specification creates no figure files by itself and changes no project website content.

@@ -1,4 +1,5 @@
 MODULE Route
+FORMAT Pseudocode.
 PURPOSE Construct the shortest eligible contiguous same-line segment between endpoints.
 PAPER Candidate route features in Section 4.5.
 

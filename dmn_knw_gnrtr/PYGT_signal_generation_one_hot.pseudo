@@ -1,4 +1,5 @@
 MODULE PYGT_signal_generation_one_hot
+FORMAT Pseudocode.
 PURPOSE Build aligned graph-temporal signals for production and attraction estimation.
 PAPER Sections 4.3.1-4.3.2, Equation (14); Section 5.1.2.
 
@@ -33,7 +34,7 @@ PROCEDURE PYGT_signal_generation
         END IF
         ADD those canonical columns, with population counts, shares and persons/household units.
     ELSE:
-        OMIT all socio-demographic columns and do not load their artifacts.
+        OMIT socio-demographic columns and their artifact loads.
         REQUIRE station-identity/coordinate extensions disabled for the named Case 2c experiment.
         LABEL any such added static extension as a different variant.
     END IF
@@ -43,7 +44,7 @@ PROCEDURE PYGT_signal_generation
     ADD event intensity under an explicit calculation and availability policy.
     IF optional station identity is requested:
         FIT a category map from the declared network registry.
-        RECORD that it augments, rather than replaces, Equation (14).
+        RECORD this feature block as an augmentation of Equation (14).
     END IF
     IF optional latitude/longitude are requested:
         VERIFY coordinate order and CRS.
@@ -93,7 +94,7 @@ PROCEDURE PYGT_signal_generation
         FOR EACH continuous column:
             FIT mean and scale on the declared fitting rows.
             IF the column is constant:
-                RECORD a constant-feature transform instead of dividing by zero.
+                RECORD the constant-feature transform for the zero-variance case.
             END IF
         END FOR
         FREEZE the transform and categorical schema.

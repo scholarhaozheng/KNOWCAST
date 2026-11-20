@@ -1,4 +1,5 @@
 MODULE Process_Time_DepartFreDic
+FORMAT Pseudocode.
 PURPOSE Tensorize line-specific service records on the shared station and line axes.
 PAPER Section 4.5.1 K7 and Section 4.6 Eq. (26).
 

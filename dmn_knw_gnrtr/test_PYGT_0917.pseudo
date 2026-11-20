@@ -1,6 +1,7 @@
 MODULE test_PYGT_0917
+FORMAT Pseudocode.
 PURPOSE Reload and evaluate the independent generation estimator.
-PAPER Section 4.3.2; these are auxiliary diagnostics, not Table 3 OD metrics.
+PAPER Section 4.3.2; auxiliary generation diagnostics.
 
 PROCEDURE test_PYGT
     INPUT base_dir, prefix, str_prdc_attr, optional checkpoint_descriptor and evaluation_set.

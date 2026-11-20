@@ -1,4 +1,5 @@
 MODULE Generating_Metro_Related_data
+FORMAT Pseudocode.
 PURPOSE Build metro topology, enumerate candidate routes, and index OD/path/section incidences.
 PAPER Sections 4.5.1-4.5.3, Equations (21)-(24); Section 4.7.
 
@@ -25,7 +26,7 @@ PROCEDURE get_same_lines
     REMOVE duplicates.
     ORDER common lines by the declared line registry.
     RETURN the common line list, possibly empty.
-    NOTE shared membership alone does not prove an uninterrupted operating segment.
+    An operating segment requires shared line membership and continuous service.
 END PROCEDURE
 
 PROCEDURE dijkstra
@@ -36,7 +37,7 @@ PROCEDURE dijkstra
     REQUIRE each movement arc traverses exactly one physical directed section on one line.
     EXPAND multi-section shortcuts before search; preserve their complete station/line sequences.
     EXCLUDE zero-length same-station movement arcs; actual line changes are charged on the next movement.
-    INTERPRET absent arcs as unavailable, not as cost 9999.
+    INTERPRET absent arcs as unavailable.
     IF start_index equals end_index:
         RETURN zero cost and an explicit zero-length path status.
     END IF
@@ -128,7 +129,7 @@ PROCEDURE yen_ksp
                 INSERT path with total cost and deterministic tie key.
                 RECORD its candidate signature.
             END IF
-            DISCARD the working graph; never leave exclusions in the original.
+            DISCARD the working graph after the candidate search.
         END FOR
         IF no valid candidate remains:
             BREAK with fewer than k paths.
@@ -138,7 +139,7 @@ PROCEDURE yen_ksp
             CONTINUE removing candidates until valid or the collection is empty.
         END IF
         IF the collection exhausted without a valid candidate:
-            BREAK; do not loop indefinitely.
+            BREAK.
         END IF
         APPEND the valid candidate to accepted_paths.
         RECORD its signature.
@@ -214,7 +215,7 @@ PROCEDURE print_route_info
     REPORT stations in the actual traversal direction.
     CHECK that printed endpoints equal the route endpoints.
     IF the route cannot be resolved in the line registry:
-        REPORT an invalid-route diagnostic instead of a fabricated itinerary.
+        REPORT an invalid-route diagnostic.
     END IF
 END PROCEDURE
 
@@ -243,7 +244,7 @@ PROCEDURE Generating_Metro_Related_data
         EXPAND every valid route alternative into its adjacent directed section/line arcs.
         DEDUPLICATE identical directed physical-section/line arcs, retaining parallel distinct line IDs.
         IF no route exists:
-            STORE an unavailable arc, not a traversable sentinel route.
+            STORE an unavailable arc.
         END IF
     END FOR
     SELECT manual or automatic enumeration mode.

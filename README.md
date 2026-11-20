@@ -14,7 +14,7 @@
 <p align="center"><strong>Transportation theory inside the learning process.</strong><br>
 Forecast metro demand and infer how it moves through the network in one coupled framework.</p>
 
-**Algorithm companion:** Read the [pseudocode guide](PSEUDOCODE_GUIDE.md) for the complete data, model, training and evaluation procedures.
+**Pseudocode:** Read the [guide](PSEUDOCODE_GUIDE.md) for data preparation, model construction, training and evaluation.
 
 [Overview](#overview) · [Architecture](#architecture) · [Results](#main-results) · [Ablations](#ablation-studies) · [Path-flow evidence](#path-flow-and-section-load-evidence) · [Citation](#citation) · [Pseudocode guide](#pseudocode-guide)
 
@@ -26,7 +26,7 @@ Forecast metro demand and infer how it moves through the network in one coupled 
 <p align="center"><em>Figure 3 from the paper. Knowledge-integrated traffic predictor units connect historical demand, transportation knowledge, and future OD forecasts.</em></p>
 
 > **At a glance:** 154 stations · 17 transfer stations · 15-minute intervals · 10 forecasting baselines.<br>
-> KNOWCAST achieves **1.02 MAE**, **3.04 RMSE**, and **54.25% WMAPE** on the reported test task.
+> The paper reports **1.02 MAE**, **3.04 RMSE**, and **54.25% WMAPE** on the test task.
 
 ## Overview
 
@@ -38,7 +38,7 @@ KNOWCAST addresses these challenges by incorporating **trip generation, trip dis
 
 ### What the paper contributes
 
-- **Structured knowledge integration.** Transportation mechanisms translate influencing factors into model components rather than leaving all relationships to be learned from concatenated inputs.
+- **Structured knowledge integration.** Transportation mechanisms organize influencing factors into model components.
 - **Coupled OD and path-flow outputs.** A trainable utility layer and Logit assignment connect OD forecasts to topology-feasible candidate paths without requiring path-level training labels.
 - **Interpretable adaptation.** Knowledge-derived utility parameters provide initial values and are refined during training; their trajectories can be inspected.
 - **Empirical evaluation.** The study compares ten baselines, tests individual and combined components, examines a second learner architecture, and assesses section-load plausibility using sampled observations.
@@ -132,7 +132,7 @@ I^{\mathrm{raw},X}_{d,t}(m,n),
 \qquad X\in\{A,F\}.
 $$
 
-The destination mapping remains fixed during training, validation, and testing. The reported **0.23 retention ratio is a matrix-dimension retention ratio**. It is not a statement that only 23% of passenger volume is retained: the residual column preserves the remaining origin-level flow.
+The destination mapping remains fixed during training, validation, and testing. The **0.23 retention ratio measures matrix dimensions**; the residual column preserves all flow to nonretained destinations.
 
 ### Guide early training with trip generation
 
@@ -289,7 +289,7 @@ Metrics are calculated separately for each prediction horizon and then averaged.
 
 Relative to the strongest reported baseline values, KNOWCAST reduces **MAE by 25.0%**, **RMSE by 45.8%**, and **WMAPE by 26.3%**. The WMAPE change is **19.40 percentage points**. These reductions are calculated from the rounded values in Table 3.
 
-The paper’s time-series examples show that the model follows major demand patterns while smoothing some abrupt, short-lived peaks. The reported validation/test RMSE difference is linked to the magnitude of extreme errors; it does not establish that the test period is generally easier.
+The paper’s time-series examples show that the model follows major demand patterns while smoothing some abrupt, short-lived peaks. The validation/test RMSE difference reflects the magnitude of extreme errors.
 
 ### Performance across the demand distribution
 
@@ -343,7 +343,7 @@ Final MAE reaches 1.02 in all three cases. The main benefit of trip generation a
 
 In Case 8, the utility coefficients evolve from **−0.30 to approximately −1.25** for station traversal and from **−0.573 to approximately −0.77** for transfers. Breakpoint analysis identifies transitions near epochs **55** and **68**, respectively.
 
-These are **forecasting-calibrated operational coefficients for the studied network**. They are not directly measured population preferences or universally transferable behavioral constants.
+These utility coefficients are **calibrated through forecasting on the studied network**.
 
 ## Computational efficiency
 
@@ -356,13 +356,13 @@ These are **forecasting-calibrated operational coefficients for the studied netw
 | GATRU + generic MLP · Case 3b | 28.7 s | 1,485 ms |
 | KNOWCAST · Case 2 | 43.8 s | 2,150 ms |
 
-The workstation used two Intel Xeon Gold 5318Y CPUs at 2.10 GHz, **48 physical cores**, **96 logical threads**, and **503 GiB memory**. Latency is a single validation forward pass per batch, averaged over five consecutive epochs; it is not a per-passenger or per-OD latency.
+The workstation used two Intel Xeon Gold 5318Y CPUs at 2.10 GHz, **48 physical cores**, **96 logical threads**, and **503 GiB memory**. Latency measures one validation forward pass per batch, averaged over five consecutive epochs.
 
 ## Path-flow and section-load evidence
 
 The model estimates path flows from predicted retained-OD demand and learned choice probabilities. Those estimates are aggregated to directed sections. Figure 14 in the paper shows average section density and the 33 largest cumulative directed section-flow entries.
 
-**Path-level ground-truth labels are unavailable.** The empirical assessment therefore compares aligned train-load estimates with sampled observations, rather than validating individual paths or continuous section flows directly.
+The paper assesses path-derived section flows **indirectly**, by comparing aligned train-load estimates with sampled observations. Individual paths have no ground-truth labels.
 
 The observation protocol covers **14 fixed daily time slices over 10 days**. Annotators count passengers in one designated carriage of a selected train; a corridor- and period-calibrated factor expands those counts to train-level observations. The modeled flows undergo:
 
@@ -391,22 +391,20 @@ Final load WMAPE ranges from **21.23% to 28.19%**, with correlations of **0.780�
 | 15% matrix-dimension retention | 0.86 | 2.65 | 43.67% |
 | 80% matrix-dimension retention | 1.72 | 9.41 | 77.94% |
 
-Shorter historical context and longer forecast horizons make prediction harder. Retention settings require a different interpretation: stronger compression changes the prediction target by aggregating more sparse destinations. Its lower errors should not be interpreted as improved accuracy on an unchanged full OD matrix.
+Shorter historical context and longer forecast horizons make prediction harder. Stronger compression aggregates more sparse destinations, changing both the prediction target and its error scale. Comparisons of forecasting accuracy therefore use a fixed retention setting.
 
 ## Scope and future work
 
-- **One-city validation.** Cross-city transfer and evolving-network generalization remain potential applications requiring further evaluation.
-- **Unobserved routes.** Path estimates are structurally constrained inferences, and direct path-level accuracy is not established.
+- **Network transfer.** The study covers one city; cross-city transfer and evolving networks are directions for further evaluation.
+- **Route observations.** Direct path observations would extend the current indirect train-load assessment.
 - **Residual demand.** Path and section inference covers explicitly retained OD pairs; the aggregate residual is excluded from direct assignment.
 - **Long-tail errors.** Percentage errors remain high on sparse OD pairs, even when absolute predictions on zero-flow cases are small.
 - **Complex interactions.** Further work should quantify sensitivity to knowledge-based initialization and nonlinear interactions among Knowledge Integrators.
 - **Disruption scenarios.** Emergency evacuations and more complex operational disruptions are proposed directions for future study.
 
-<a id="original-implementation-guide"></a>
-
 ## Pseudocode guide
 
-The algorithms are presented as non-executable `.pseudo` files in the original module directories. Start with the [complete reading guide](PSEUDOCODE_GUIDE.md), then follow the workflow below.
+The `.pseudo` files describe the algorithms step by step. Start with the [reading guide](PSEUDOCODE_GUIDE.md), then follow the workflow below.
 
 | Step | Read | Covers |
 | --- | --- | --- |
@@ -417,9 +415,7 @@ The algorithms are presented as non-executable `.pseudo` files in the original m
 | Evaluate predictions | [Shared evaluation](train_evaluate_functions.pseudo) and [checkpoint evaluation](evaluate_button.pseudo) | Sample alignment, original-scale metrics and prediction exports |
 | Inspect the experiments | [Ablation and sensitivity](experiments/ablation_and_sensitivity.pseudo) · [Operational loads](experiments/operational_load_assessment.pseudo) | Component comparisons, task settings and train-load assessment |
 
-The [module inventory](audit/SOURCE_COVERAGE.md) maps all 42 original modules to their counterparts. [Shared interfaces](specs/interface_contracts.md), [paper settings](specs/paper_settings.yaml) and [implementation parameters](specs/implementation_parameters.md) describe the data and configuration passed between them. For an executable implementation, see the [required inputs and checks](REPRODUCIBILITY.md).
-
-[Edition status](REPOSITORY_STATUS.md) describes the provenance and scope of this paper-method pseudocode companion.
+The [module index](validation/MODULES.md) lists all 46 algorithms. [Shared interfaces](specs/interface_contracts.md), [paper settings](specs/paper_settings.yaml) and [implementation parameters](specs/implementation_parameters.md) describe their data and configuration. See [data and configuration](REPRODUCIBILITY.md) for experiment inputs.
 
 ### Repository layout
 
@@ -430,7 +426,7 @@ generating_domain_knowledge_no_DO_clean.pseudo
 train_save_history.pseudo · bayes_opt.pseudo · evaluate_button.pseudo
 train_evaluate_functions.pseudo
 dmn_knw_gnrtr/ · lib/ · metro_components/ · metro_data_convertor/ · models/
-experiments/ · visualization_tools/ · specs/ · audit/
+experiments/ · visualization_tools/ · specs/ · validation/
 docs/                        research website, paper reader and figures
 ~~~
 
@@ -444,7 +440,7 @@ python -m http.server 4173 --directory docs
 
 Then open [the local preview](http://localhost:4173). You can also open [docs/index.html](docs/index.html) directly in a browser.
 
-**中文阅读说明：** 主页保留论文介绍、图表和结果展示；完整算法请从[伪代码指南](PSEUDOCODE_GUIDE.md)进入仓库阅读。网页内容、样式和交互分别位于 `docs/index.html`、`styles.css` / `refine.css` 和 `app.js`，上面的命令用于本地预览网页。
+**中文阅读说明：** 主页介绍论文方法、图表和结果；算法请从[伪代码指南](PSEUDOCODE_GUIDE.md)进入仓库阅读。网页内容、样式和交互分别位于 `docs/index.html`、`styles.css` / `refine.css` 和 `app.js`，上面的命令用于本地预览网页。
 
 ## Data availability and authorship
 
@@ -492,4 +488,4 @@ If you use or discuss KNOWCAST, please cite:
 
 ## Acknowledgement
 
-This repository partially builds upon the [HIAM](https://github.com/HCPLab-SYSU/HIAM) project. We sincerely appreciate their contributions to the open-source community.
+This work builds in part on [HIAM](https://github.com/HCPLab-SYSU/HIAM).

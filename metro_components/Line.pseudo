@@ -1,4 +1,5 @@
 MODULE Line
+FORMAT Pseudocode.
 PURPOSE Store stations in their physical sequence along one line.
 PAPER Sections 4.5–4.8.
 

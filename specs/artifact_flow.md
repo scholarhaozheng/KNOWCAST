@@ -1,6 +1,6 @@
-# Artifact and invocation flow
+# Data and model workflow
 
-This is a dependency map for the standalone pseudocode, not a website build or an executable launcher. Every box requires validated identities, shapes and provenance before its consumers run.
+The diagram follows data from source records through model fitting and evaluation.
 
 ```mermaid
 flowchart TD
@@ -34,23 +34,29 @@ flowchart TD
   U --> V[Held-out OD and path-section outputs]
 ```
 
-## Invocation boundaries
+## Entry points
 
 | Entry point | Consumes | Produces |
 | --- | --- | --- |
-| [Artifact pipeline](../generating_domain_knowledge_no_DO_clean.pseudo) | Explicit config, source tables/records, stage selection, required fitted artifacts for reuse | Versioned artifact registry, split bundles, training-fit mappings, auxiliaries, calibration/pretraining artifacts and stage journal |
-| [Training](../train_save_history.pseudo) | Training/validation bundles, known maps/transforms, active component artifacts and declared optimization choices | Selected checkpoint, per-epoch checkpoints when requested, histories, selected validation exports and optional sealed final test evaluation |
-| [Search](../bayes_opt.pseudo) | Compatible base config, shared split/artifact definitions and resource/search protocol | SQLite study, trial configs/checkpoints, trial CSV/figure and selected-configuration training outputs |
-| [Checkpoint evaluation](../evaluate_button.pseudo) | Explicit checkpoint, its manifest, frozen transforms and requested split | Aligned predictions/truth/masks, per-horizon metrics, optional assignments and export manifest |
+| [Data pipeline](../generating_domain_knowledge_no_DO_clean.pseudo) | Configuration, source tables, stage selection and existing artifacts selected for reuse | Station registry, split bundles, destination mappings, auxiliary models, calibration and encoder checkpoints |
+| [Training](../train_save_history.pseudo) | Training/validation bundles, fitted transforms, active component artifacts and optimizer settings | Selected checkpoint, training histories and prediction exports |
+| [Search](../bayes_opt.pseudo) | Base configuration, shared data splits, artifact definitions and search settings | SQLite study, trial configurations, checkpoints and selected-configuration training |
+| [Checkpoint evaluation](../evaluate_button.pseudo) | Selected checkpoint, frozen transforms and requested split | Aligned predictions, targets, masks, per-horizon metrics and optional assignments |
 
-The independently pretrained generation model and all autoencoders are persistent artifacts. Forward passes reuse registered models. Frequency-only and distribution-without-generation-loss variants retain their required upstream inputs.
+## Component dependencies
 
-The diagram shows the complete model. Ablations prune dependencies according to their active components: raw feature preparation is separate from auxiliary-model training; path outputs can require raw timetables even without the service encoder; Case 3b uses a declared external generic-feature adapter. A disabled component does not automatically require its checkpoint, utility model or autoencoder.
+Generation models and pretrained encoders are loaded once and registered with the forecasting model. Forward passes reuse them. Generation guidance and distribution features both require independent production and attraction estimates. Distribution also reads the target-time impedance matrix.
 
-## Missing original dependencies made explicit
+The diagram shows the complete model. Each variant prepares inputs for its active components:
 
-The preserved source imports `config.py`, `visualization_tools.plot_graph` and `archieve.train_button`; these were absent from the visible tracked snapshot. The reconstruction supplies [configuration contracts](../config.pseudo) and [six plotting interfaces](../visualization_tools/plot_graph.pseudo), and replaces the missing archive config reader with the common safe configuration-reader contract. The audit inventory identifies these as added interfaces rather than recovered files.
+- Raw generation features can be prepared separately from auxiliary-model training.
+- Path feasibility and assignment use raw timetables, including when the service encoder is disabled.
+- Each structured encoder uses its own pretrained parameters.
+- Case 3b prepares the configured raw features and passes them to the MLP constructed by `Net`.
+- Historical day/week/month references are loaded when unfinished-trip branches or a requested diagnostic use them.
 
-Third-party numerical primitives remain primitive interfaces: tensor algebra/autodiff, a DCRNN recurrent operator, safe YAML parsing, table/raster/database access, optimization and plotting. Their inputs, outputs and required behavior are specified at call boundaries. The original source also delegated these operations to libraries; this edition does not claim to recover or replace their implementations.
+## Preparation and reuse
 
-Raw AFC records, full timetables, exact model configs, auxiliary/main checkpoints and the original search database remain unavailable. A `REUSE_VERIFIED` stage therefore checks both existence and compatible hashes; it cannot turn an absent input into a placeholder result.
+A `BUILD` stage fits or constructs an artifact from its inputs. A `REUSE_VERIFIED` stage loads an existing artifact after matching its configuration, shape, units and IDs. A missing required input returns `Pending(missing)`; an incompatible artifact returns a failure. The pipeline passes the resulting registry to sample generation and training.
+
+[Configuration](../config.pseudo) supplies data sources, dimensions and stage choices. [Plotting](../visualization_tools/plot_graph.pseudo) consumes training histories and aligned prediction records. Numerical backends provide tensor algebra, automatic differentiation, DCRNN operators, optimization, table/raster/database access and plotting through the interfaces in each procedure.
