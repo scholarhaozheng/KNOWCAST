@@ -1,0 +1,28 @@
+MODULE Line
+PURPOSE Store stations in their physical sequence along one line.
+PAPER Sections 4.5–4.8.
+
+CLASS Line
+    STATE line_number: canonical ID, including branch identity
+    STATE stations: ordered canonical Station references
+END CLASS
+
+PROCEDURE Line.__init__(line_number)
+    INPUT line identifier from the network manifest.
+    OUTPUT an empty Line.
+    self.line_number <- NORMALIZE line_number under the line-ID schema
+    self.stations <- empty list
+    RETURN self
+END PROCEDURE
+
+PROCEDURE Line.add_station(station)
+    INPUT canonical Station resolved by StationManager.
+    OUTPUT this Line with station appended.
+    IF station already occurs in self.stations:
+        RAISE RepeatedOccurrenceRequiresTrackSchema(station, self.line_number)
+    END IF
+    station.add_line(self.line_number)
+    station.station_sequence_of_the_line[self.line_number] <- length(self.stations)
+    APPEND station to self.stations
+    RETURN self
+END PROCEDURE

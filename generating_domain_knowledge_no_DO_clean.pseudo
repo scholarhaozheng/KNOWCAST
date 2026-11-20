@@ -1,0 +1,316 @@
+MODULE generating_domain_knowledge_no_DO_clean
+PURPOSE Prepare network, demand, pretrained knowledge and sample-aligned artifacts.
+PAPER Sections 4.2–4.6 and 5.1.1; Eqs. (2)–(27).
+
+INPUT cfg: paths, schemas, component switches, stage modes, split/window policies and fitting settings.
+OUTPUT ArtifactRegistry with shared axis IDs, stage receipts and one completed preprocessing manifest.
+STAGE modes: BUILD, REUSE_VERIFIED, DISABLED_BY_MODEL_VARIANT.
+FIT scope: training intervals only; evaluation inputs use information available at each forecast origin.
+
+PROCEDURE main(args = EXPLICIT_PIPELINE_ARGUMENTS)
+    INPUT config path, explicit project/output root and requested stages.
+    OUTPUT {ArtifactRegistry, status, diagnostics}.
+    start_time <- wall_clock()
+    start_monotonic <- monotonic_clock()
+    cfg <- READ validated YAML from args.config
+    project_root <- Find_project_root(explicit_root=args.project_root,root_schema=cfg.project_layout)
+    base_dir <- RESOLVE cfg.data.artifact_directory against project_root
+    stage <- cfg.stages
+    switches <- cfg.component_switches
+    R <- cfg.data.R
+    K <- R + 1
+    lh <- cfg.data.lh
+    lf <- cfg.data.lf
+    CHECK 0 <= R < cfg.data.N and nonoverlapping train/val/test target ranges
+
+    auxiliary_required <- switches.trip_generation OR switches.trip_distribution
+    history_required <- switches.history_distribution OR cfg.exports.reference_artifacts
+    generic_required <- switches.generic_exogenous_enabled
+    path_required <- switches.traffic_assignment OR switches.path_outputs_requested
+    catalog_required <- path_required OR cfg.exports.candidate_catalog OR stage.legacy_fixed_logit=BUILD
+    service_required <- switches.depart_freq OR path_required OR generic raw-service dependency
+    raw_covariates_required <- auxiliary_required OR generic_required
+    demographic_required <- (auxiliary_required AND cfg.domain_knowledge.generation_covariates=full)
+                            OR (generic_required AND generic input schema requests demographic fields)
+    dependencies <- active dependencies derived from these predicates
+    readiness <- VALIDATE BUILD input schemas/settings and REUSE_VERIFIED artifact identities
+    IF readiness has unresolved required inputs:
+        RETURN {status=UNRESOLVED, diagnostics=readiness}
+    END IF
+    ArtifactRegistry <- planned paths, schemas and dependencies for active stages
+    run_id <- new run ID
+    status <- RUNNING
+    stage_timings <- empty mapping
+    EXECUTE each named STAGE with its start/finish monotonic times and status recorded in stage_timings
+
+    TRY:
+        STAGE A — NETWORK AND CANDIDATE ROUTES
+            IF stage.topology=BUILD:
+                (station_manager,line_manager) <- request_suzhou_metro_data(
+                    cfg.sources.network_workbook, ArtifactRegistry.graph_path,
+                    ArtifactRegistry.station_index_path, ArtifactRegistry.station_manager_path,
+                    cfg.sources.preexisting_coordinate_results_workbook; cfg.network_schema)
+                network_bundle <- managers, written graph/registry artifacts and shared manifest IDs
+            ELSE:
+                network_bundle <- LOAD verified graph and registry artifacts
+            END IF
+            REGISTER physical directed sections and separate line-specific memberships
+            IF catalog_required:
+                IF stage.topology=BUILD:
+                    routes <- Generating_Metro_Related_data(
+                        configured route arguments; cfg.network_schema, network_bundle)
+                ELSE:
+                    routes <- LOAD verified candidate catalog with matching topology ID
+                END IF
+                REGISTER OD candidates, path IDs, stop/transfer counts and exact section identities
+            END IF
+
+        STAGE B — TIMETABLE AND FREQUENCY
+            IF service_required:
+                IF stage.frequency=BUILD:
+                    timetable <- Get_Time_DepartFreDic(
+                        configured timetable/network paths, interval and service-date bounds;
+                        cfg.timetable_schema, cfg.forecast_origin_policy)
+                    FOR EACH prefix in {train,val,test}:
+                        frequency[prefix] <- Process_Time_DepartFreDic(
+                            configured station/timetable/output paths;
+                            line_manifest, source_schema, output_variant=paper_tensor)
+                    END FOR
+                ELSE:
+                    frequency <- LOAD verified service artifacts and coverage
+                END IF
+                REGISTER raw frequency in trains_per_hour, topology support and known-status masks
+            END IF
+
+        STAGE C — PATH ATTRIBUTES AND EXACT INCIDENCE
+            IF stage.legacy_fixed_logit=BUILD:
+                diagnostic_probabilities <- Generating_logit_probabilities(configured candidate and output paths)
+                REGISTER diagnostic_probabilities with role=legacy_diagnostic_only
+            END IF
+            IF path_required:
+                path_artifacts <- generating_OD_section_pssblty_sparse_array_0209(
+                    configured candidate/service sources, processing mode, worker/device and storage policies)
+                REGISTER candidate attributes, FEASIBLE/INFEASIBLE/UNKNOWN/PADDED states and exact incidence
+                REGISTER optional CP factors only when requested
+            END IF
+
+        STAGE D — AFC EXTRACTION AND INTERVAL LABELS
+            FOR EACH prefix in {train,val,test}:
+                IF stage.raw_afc[prefix]=BUILD:
+                    connection_settings <- READ configured credential reference
+                    (records,interval_grid,station_to_codes,code_to_station) <- Connect_to_SQL(
+                        prefix, configured split queries, station artifact, connection_settings)
+                ELSE:
+                    (records,interval_grid,station_to_codes,code_to_station) <- LOAD verified cached extract
+                END IF
+                IF stage.interval_od[prefix]=BUILD:
+                    interval_artifacts[prefix] <- generate_OD_DO_array(
+                        records, interval_grid, station_to_codes, code_to_station,
+                        base_dir, prefix, station artifact, output path; cfg.event_contract)
+                ELSE:
+                    interval_artifacts[prefix] <- LOAD verified interval artifact
+                END IF
+                REGISTER full actual OD, separate production/attraction, label completeness and observation_store
+            END FOR
+
+        STAGE E — FIXED DESTINATIONS AND WINDOW PLAN
+            IF stage.destination_mapping=BUILD:
+                mapping <- fit_training_destination_mapping(
+                    interval_artifacts.train.actual_OD, R, station_order)
+            ELSE:
+                mapping <- LOAD verified RDS/residual-share bundle and training fit period
+            END IF
+            REGISTER mapping.RDS_id and residual_shares_id
+            FOR EACH prefix in {train,val,test}:
+                sample_plan[prefix] <- build_sample_plan(
+                    interval_artifacts[prefix].interval_grid, cfg.splits[prefix],
+                    cfg.sample_policy, lh, lf)
+            END FOR
+
+        STAGE F — RAW GENERATION FEATURES AND AUXILIARY PRETRAINING
+            IF raw_covariates_required:
+                IF demographic_required:
+                    demographic_artifact <- trip_generation_info_generating.main(cfg.demographics)
+                    REGISTER PopAct, AgePct_work, EduPct_* and HHSize with census definitions
+                END IF
+                calendar_event_store <- PREPARE calendar/event inputs under cfg.covariate_schema
+                REGISTER TOD as hours since civil midnight in [0,24), Wknd, Season and Event
+                REGISTER 800 m population catchment and within-1-km event provenance where applicable
+                ArtifactRegistry.raw_exogenous_stores <- selected demographics, calendar, event and service sources
+            END IF
+            IF auxiliary_required:
+                FOR EACH (legacy_task,task) in {(prdc,production),(attr,attraction)}:
+                    FOR EACH prefix in {train,val,test}:
+                        signals[task,prefix] <- PYGT_signal_generation(
+                            configured station/graph/interval/normalization paths, prefix, legacy_task;
+                            demographic_artifact if required, calendar_event_store,
+                            generation_covariate_profile=cfg.domain_knowledge.generation_covariates)
+                        FIT task normalization on train; RESTORE the same transform for val and test
+                    END FOR
+                    IF stage.auxiliary_training[legacy_task]=BUILD:
+                        auxiliary[task] <- run_PYGT(
+                            base_dir=base_dir,prefix=train,str_prdc_attr=task,
+                            signal_artifact=signals[task,train],lr=real(cfg.domain_knowledge.lr),
+                            configured architecture dimensions, L_h/L_f, optimizer and validation settings)
+                    ELSE:
+                        auxiliary[task] <- LOAD verified task checkpoint, transforms and sequence contract
+                    END IF
+                    IF auxiliary diagnostics are requested:
+                        diagnostics[task] <- test_PYGT(base_dir,configured diagnostic prefix,task,
+                            checkpoint_descriptor=auxiliary[task],evaluation_set=declared diagnostic split)
+                    END IF
+                    REGISTER canonical task ID and explicit legacy filename aliases
+                END FOR
+            END IF
+
+        STAGE G — GRAVITY CALIBRATION AND DISTRIBUTION INPUTS
+            IF switches.trip_distribution:
+                O_train <- interval_artifacts.train.production
+                D_train <- interval_artifacts.train.attraction
+                Q_train <- interval_artifacts.train.actual_OD
+                C_train <- aligned training generalized impedance with configured cost units/support
+                CHECK matching time axes and equal total O_train[t], D_train[t] for each t
+                IF stage.gravity_calibration=BUILD:
+                    (zeta,a_by_time,b_by_time,Q_fit) <- fit_trip_distribution_model(
+                        O_train,D_train,C_train,Q_train,time_steps=length(training_time_axis),
+                        configured calibration and IPF policies)
+                ELSE:
+                    zeta <- LOAD verified frozen gravity parameter with cost/support metadata
+                END IF
+                REGISTER zeta and calibration diagnostics
+                impedance_store <- PREPARE admissible K4 costs indexed by valid_time and issue_time
+                FOR EACH (sample_id,t0,tau) required by sample_plan:
+                    (P,A) <- PREDICT independent auxiliary marginals for tau using full task contexts available by t0
+                    (working_P,working_A) <- COPY and reconcile only their total mass under cfg.margin_policy
+                    C_t <- select_available_snapshot(impedance_store,tau,t0,cfg.impedance_selection_policy)
+                    gravity_result <- compute_flow(working_P,working_A,C_t.values,zeta;
+                                        support_mask=C_t.support,ipf_policy=cfg.ipf_policy)
+                    CHECK gravity_result.status=CONVERGED
+                    distribution_for_pretraining[sample_id,tau] <- COMPRESS gravity_result.q using mapping
+                    STORE original P/A separately from the reconciled working margins
+                END FOR
+                REGISTER impedance_store and dynamic_impedance[N,N] units/target_time/availability metadata
+            END IF
+
+        STAGE H — KNOWLEDGE AUTOENCODERS
+            families <- enabled subset of {distribution,section_probability,departure_frequency}
+            FOR EACH family in families:
+                IF family=distribution:
+                    matrices <- training distribution_for_pretraining under fixed RDS
+                ELSE IF family=section_probability:
+                    utility_state <- configured pretraining initialization and its provenance
+                    matrices <- masked Logit plus exact incidence for training OD/time contexts
+                ELSE:
+                    matrices <- training line-frequency matrices in declared axis layout
+                END IF
+                IF stage.autoencoder[family]=BUILD:
+                    transform <- FIT configured feature transform on matrices
+                    autoencoder <- PRETRAIN declared architecture using mean squared reconstruction loss
+                    SAVE encoder, decoder, architecture, vectorization layout and transform
+                ELSE:
+                    (autoencoder,transform) <- LOAD matching verified pretrained artifacts
+                END IF
+                REGISTER encoder as a trainable main-model initializer
+            END FOR
+
+        STAGE I — OBSERVABLE SAMPLES AND KNOWLEDGE JOIN
+            FOR EACH prefix in {train,val,test}:
+                generation_signal_bundle <- signals for both tasks IF auxiliary_required ELSE absent
+                sample_bundle <- generating_trip_generation_data_and_OD_dict(
+                    configured split/sample arguments, seq_len=lh, horizon=lf, mapping,
+                    observation_store=interval_artifacts[prefix].observation_store,
+                    sample_plan=sample_plan[prefix], history_required, auxiliary_required,
+                    generation_signal_bundle)
+                generic_records <- absent
+                IF generic_required:
+                    generic_records <- prepare_generic_exogenous_inputs(
+                        sample_bundle.manifest, ArtifactRegistry.raw_exogenous_stores,
+                        cfg.generic_exogenous_contract.input_schema)
+                END IF
+                aligned <- generating_traffic_assignment_knowledge_with_timestamp(
+                    base_dir,prefix,cfg.snapshot_mode,lh,lf,sample_bundle.manifest,
+                    component_switches=switches, dependency_manifest=dependencies,
+                    missing_knowledge_policy=cfg.missing_knowledge_policy,
+                    service_store=frequency[prefix] if service_required,
+                    path_store=path_artifacts if path_required,
+                    impedance_store=impedance_store if switches.trip_distribution,
+                    generic_exogenous_records=generic_records,
+                    auxiliary_contracts=auxiliary contracts if auxiliary_required,
+                    auxiliary_feature_store=signals if auxiliary_required)
+                APPLY aligned.accepted_sample_ids to sample_bundle and its optional feature/reference artifacts
+                ATTACH aligned encoder/decoder knowledge by sample_id
+                REGISTER split bundle and complete alias manifest
+            END FOR
+
+        STAGE J — PUBLISH
+            CHECK active artifact shapes, station/line/RDS/transform IDs and dependency hashes
+            CHECK all sample arrays have identical IDs, exact lh/lf timestamps and cutoff provenance
+            manifest <- ArtifactRegistry resolved outputs, completed stages, hashes and stage_timings
+            main.write_cfg_file(configured generated-config path, resolved cfg)
+            main.save_to_pkl(manifest, configured preprocessing-manifest path)
+            status <- COMPLETE
+    ON failure:
+        status <- FAILED
+        diagnostics <- failed stage and unfinished outputs
+    FINALLY:
+        CLOSE database handles, worker pools, rasters and file descriptors
+        duration <- monotonic_clock() - start_monotonic
+        WRITE run_id, start_time, stop_time, duration, status and stage timings
+    END TRY
+    RETURN {ArtifactRegistry, status, diagnostics}
+END PROCEDURE
+
+PROCEDURE main.write_cfg_file(filename,cfg_to_write)
+    INPUT generated configuration path and resolved configuration.
+    OUTPUT {filename, schema_version, content_hash}.
+    temporary <- WRITE cfg_to_write as safe YAML to a sibling temporary path
+    READ and validate temporary as the same configuration schema
+    PUBLISH temporary as filename
+    RETURN {filename, schema_version, content_hash}
+END PROCEDURE
+
+PROCEDURE main.save_to_pkl(data,filename)
+    INPUT typed artifact and output path with its declared serialization schema.
+    OUTPUT {filename, schema_version, content_hash, shape_summary}.
+    payload <- SERIALIZE data using the configured portable format or trusted local-pickle adapter
+    temporary <- WRITE payload to a sibling temporary path
+    READ temporary and CHECK schema, keys, axis IDs and shapes
+    PUBLISH temporary as filename
+    RETURN {filename, schema_version, content_hash, shape_summary}
+END PROCEDURE
+
+PROCEDURE prepare_generic_exogenous_inputs(sample_manifest,raw_source_stores,external_input_contract)
+    INPUT sample IDs/timestamps, raw source stores and cfg.generic_exogenous_contract.input_schema.
+    OUTPUT records keyed by (sample_id,target_time), with raw station-aligned features.
+    records <- empty mapping
+    FOR EACH sample in sample_manifest:
+        FOR EACH tau in sample.xtime followed by sample.ytime:
+            fields <- empty mapping
+            FOR EACH requested source in external_input_contract.raw_dependencies:
+                fields[source] <- select_available_snapshot(
+                    raw_source_stores[source], tau, sample.forecast_origin, declared selection policy)
+            END FOR
+            fields <- APPLY external_input_contract.missing_input_policy
+            values[N,F_exogenous] <- ALIGN and flatten fields using the declared station/line/feature layout
+            records[sample.sample_id,tau] <- {
+                values, representation=raw, feature_schema_id, units,
+                available_at, source_versions, missingness_mask
+            }
+        END FOR
+    END FOR
+    RETURN records
+END PROCEDURE
+
+SCRIPT ENTRY
+    CONFIGURE multiprocessing spawn at the script boundary when parallel work is selected
+    args <- PARSE pipeline arguments
+    RETURN main(args)
+
+OUTPUT ALIASES
+    Network: station_manager_dict, station_index, graph_sz_conn, train_dict route records.
+    Service: Time_DepartFreDic and per-split Time_DepartFreDic_Array.
+    Paths: OD_path_dic, OD_feature_array_dic, exact sparse incidence, optional CP factors.
+    Diagnostics: OD_path_visit_prob_dic/array with legacy_diagnostic_only role.
+    Demand: train/val/test_result_array, finished, unfinished_raw, y, xtime, ytime and active histories.
+    Auxiliary: separate production/attraction signals, normalization and checkpoints.
+    Gravity: explicit zeta artifact; trip_generation_trained_params remains a manifest-declared legacy alias.

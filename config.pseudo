@@ -1,0 +1,362 @@
+MODULE config
+STATUS non-executable configuration specification.
+REFERENCE specs/paper_settings.yaml supplies the paper comparison values.
+PARAMETERS Missing run values are supplied by the caller; rounded paper values retain their precision metadata.
+ENTRYPOINT CONTRACT:
+    artifact_pipeline receives args.mode=prepare.
+    main_training receives args.mode=train.
+    checkpoint_evaluation receives args.mode=evaluate.
+    bayes_study receives args.mode=tune plus a separate args.study_mode.
+    experiment receives args.mode=experiment and an explicit experiment_kind.
+    diagnostic_export receives args.mode=diagnostic_export.
+    study_mode is search, train, or search_train; its train value means final training from a study.
+    A plain main-training invocation never becomes study-based final training by matching the word train.
+
+PROCEDURE parse_arguments(request)
+    INPUT request from command-line or structured fields.
+    PARAMETERS entrypoint-mode table and explicit compatibility adapter.
+    OUTPUT normalized args with explicit-value provenance.
+    args <- PARSE_REQUEST_FIELDS(request).
+    entrypoint <- args.entrypoint; mode <- args.mode.
+    REQUIRE an explicit entrypoint from the entrypoint contract.
+    Normalize only declared legacy mode adapters before validating entrypoint/task-mode compatibility.
+    Normalize the human label 'diagnostic export' to diagnostic_export at this boundary only.
+    IF entrypoint is bayes_study:
+        ACCEPT an explicitly selected legacy adapter where old args.mode is search/train/search_train:
+            COPY that value into study_mode only when no conflicting study_mode was supplied.
+            args.mode <- tune; mode <- tune; record the adapter version.
+        REQUIRE args.mode=tune and args.study_mode in {search,train,search_train} after that normalization.
+        ACCEPT FINAL_CONFIG_FILES as the source-compatible list of final configurations.
+        Validate that list only for study modes train or search_train.
+    ELSE:
+        REJECT study_mode and FINAL_CONFIG_FILES unless a declared compatibility adapter owns them.
+    END IF
+    REQUIRE the normalized task mode matches that entrypoint's contract.
+    IF mode is experiment:
+        REQUIRE experiment_kind: benchmark, ablation, sensitivity, or operational_assessment.
+    END IF
+    REQUIRE config_filename for modes that consume a run configuration.
+    ACCEPT an explicit project_root and artifact/output locations.
+    ACCEPT a declared device policy and optional checkpoint identity.
+    ACCEPT requested dataset splits and enabled component variants.
+    ACCEPT stage BUILD / REUSE_VERIFIED / DISABLED_BY_MODEL_VARIANT selections for preprocessing.
+    ACCEPT dry specification validation independently from any numerical run request.
+    REJECT unknown arguments instead of ignoring misspelled configuration keys.
+    NORMALIZE path strings without reading credentials or starting external actions.
+    RECORD which values were supplied explicitly and which come from an identified run artifact.
+    Argument parsing returns an isolated data record.
+    When a study launches a training child, construct a fresh invocation record with
+        entrypoint=main_training,mode=train,config_filename and explicit resume_checkpoint.
+    RETURN args.
+END PROCEDURE
+
+PROCEDURE load_configuration(config_filename,project_root,invocation)
+    INPUT config_filename; optional project_root; normalized invocation.
+    PARAMETERS schema_version and the explicit alias table.
+    OUTPUT cfg; provenance {source_path,source_hash,resolved_hash,validation_report}.
+    raw_text <- READ_TEXT(config_filename).
+    cfg <- PARSE_SAFE_MAPPING(raw_text,duplicate_keys='error').
+    path_base <- project_root when supplied, otherwise DIRECTORY(config_filename).
+    Resolve cfg's relative artifact/output paths against path_base.
+    IF base_learning_rate is supplied:
+        Compare it with any train.base_lr value, then assign cfg.train.base_lr <- base_learning_rate.
+    END IF
+    IF cfg.train.generation_parameter_policy is supplied:
+        Compare it with any cfg.generation.parameter_policy value.
+        cfg.generation.parameter_policy <- cfg.train.generation_parameter_policy after agreement.
+    END IF
+    IF cfg.generation.parameter_policy='frozen_independent': cfg.generation.parameter_policy <- frozen.
+    cfg.resolved_component_context <- RESOLVE_COMPONENT_CONTEXT(cfg).
+    paper_reference <- READ_DATA('specs/paper_settings.yaml').
+    report <- validate_configuration(cfg,invocation,paper_reference).
+    cfg.validation_report <- report.
+    provenance <- {source_path:config_filename,source_hash:HASH(raw_text),
+        resolved_hash:HASH(cfg),validation_report:report}.
+    IF report.errors is nonempty AND invocation.get('dry_specification_validation',false)=false:
+        RAISE CONFIGURATION_ERROR(report).
+    END IF
+    RETURN cfg,provenance.
+END PROCEDURE
+
+PROCEDURE validate_configuration(cfg,invocation,paper_reference)
+    INPUT cfg, normalized invocation and paper reference.
+    PARAMETERS paper-reference values and stage action contracts.
+    OUTPUT ValidationReport with errors, unresolved fields, deviations and readiness states.
+    mode <- invocation.mode and entrypoint <- invocation.entrypoint.
+    study_mode <- invocation.study_mode when entrypoint=bayes_study, otherwise ABSENT.
+    experiment_kind <- invocation.experiment_kind when mode=experiment, otherwise ABSENT.
+    PHASE 1: Resolve active components and artifact states.
+    context <- cfg.resolved_component_context, or RESOLVE_COMPONENT_CONTEXT(cfg) when absent.
+    Bind generation_guidance,trip_distribution,traffic_assignment,depart_freq,history_distribution,
+        path_outputs,generic_exogenous_enabled and required-input predicates from context.
+    generic_dependencies <- context.generic_dependencies.
+    artifact_state <- ASSESS_ARTIFACT_READINESS(cfg.artifacts,context,invocation).
+    errors <- artifact_state.errors; unresolved <- artifact_state.unresolved; declared_deviations <- [].
+    Each REQUIRE below appends its field/value explanation to errors or unresolved.
+    Each paper comparison records a declared deviation separately.
+    PHASE 2: Check dimensions, data semantics and active-component parameters.
+    REQUIRE station count N and immutable station-order identity.
+    REQUIRE retained count R and fixed RDS/residual-share identities.
+    REQUIRE 0 <= R < N for the compressed residual-slot formulation.
+    DERIVE compressed destination width K <- R+1.
+    REQUIRE input_dim and output_dim conventions agree with K.
+    Read exact R from the declared destination-mapping artifact.
+    REQUIRE independently specified lookback L_h and forecast length L_f.
+    REQUIRE both lengths positive and supported by sample timestamp arrays.
+    REQUIRE interval duration, timezone, service-day boundary, and interval closure rules.
+    REQUIRE train/validation/test target periods and non-overlap.
+    REQUIRE split-boundary window policy and historical-reference gap policy.
+    IF claiming the published-study task setting:
+        COMPARE network and date settings with paper_settings.dataset.
+        REQUIRE deviations to be labeled as reconstruction variants.
+    END IF
+    REQUIRE raw AFC observation/label schemas when preparing finished and unfinished demand.
+    REQUIRE event-time availability and invalid/unresolved-journey policies.
+    REQUIRE fixed station-code mappings and ambiguous-code reconciliation policy.
+    IF history_distribution:
+        REQUIRE raw reference fields for day, week, and previous calendar month.
+        REQUIRE explicit missing-history treatment separate from observed-zero fallback.
+    END IF
+    REQUIRE graph representation and attention message direction.
+    IF building the station/line registry from source tables:
+        REQUIRE explicit network_schema for station/line/topology source parsing.
+        PASS network_schema explicitly to request_suzhou rather than relying on an ambient variable.
+    ELSE require the verified existing registry/topology manifests, not unused raw workbook locations.
+    IF service_inputs_required:
+        REQUIRE raw K7 frequency units, line ordering, physical support,known-status and availability metadata.
+        USE trains/hour as the declared reconstruction convention, not a recovered paper storage unit.
+        IF reading timetables/headways:
+            REQUIRE declared headway conversion and timetable_schema.network_schema matching the network schema.
+        END IF
+        IF service_encoder_enabled:
+            REQUIRE its frequency feature-transform/pretraining identities and scale tags.
+        END IF
+    END IF
+    IF path_inputs_required:
+        REQUIRE candidate path identity, exact incidence,feasibility,padding-mask and empty-set policies.
+        REQUIRE residual destination exclusion from physical path assignment.
+    END IF
+    REQUIRE additional raw sources only when named by generic_dependencies; disabled branches need none.
+    REQUIRE normalization source, fitting axes, constant-feature policy, and transform IDs.
+    NAME the OD fitting-axis field data.scaler_axis and retain its exact resolved axes.
+    REQUIRE validation/test transforms be restored from training artifacts.
+    IF generation_inputs_required:
+        REQUIRE cfg.generation.parameter_policy in {frozen,joint_update}.
+        REQUIRE the Equation (14) feature schema and covariate availability contract.
+        REQUIRE cfg.domain_knowledge.generation_covariates in {full,temporal_only}.
+        Normalize a declared legacy generation_covariates alias to that path; reject conflicting values.
+        generation_covariates <- cfg.domain_knowledge.generation_covariates.
+        REQUIRE calendar/holiday, season and event input sources in both profiles.
+        IF generation_covariates=full:
+            REQUIRE station demographic sources and the paper's 800-m population catchment.
+        ELSE:
+            EXCLUDE the demographic block from both auxiliary input schemas.
+        END IF
+        REQUIRE the separate within-1-km event scope under either profile.
+        REQUIRE geographic distance/CRS handling and explicitly supplied event-score weights.
+        REQUIRE profile-specific pretrained production and attraction artifact identities.
+        REQUIRE each auxiliary checkpoint's own lookback, rollout, target-offset, and transform contracts.
+        REQUIRE knowledge auxiliary_context_by_task carries complete sequences or cutoff-safe references.
+        IF preparing or training an auxiliary estimator:
+            REQUIRE its complete model and sequence configuration.
+            REQUIRE positive real-valued learning rate and declared optimizer settings.
+            REQUIRE target scaling, internal holdout, and checkpoint rules.
+        END IF
+    END IF
+    IF generation guidance is enabled:
+        REQUIRE initial_generation_loss_weight >= 0 and alpha_decay >= 0.
+        REQUIRE the formula epoch-index origin.
+        STORE that convention as epoch_origin; do not derive it from displayed epoch labels.
+        REQUIRE the minibatch estimator for the Eq.(16) sum and Eq.(18) mean.
+        REQUIRE minibatch_estimator, example multiplicity, sampling weights, and accumulation rules.
+        REQUIRE fixed training-derived residual shares for destination reconstruction.
+        REQUIRE generation-estimator parameter-freezing/update policy to be declared.
+    END IF
+    IF distribution knowledge is enabled:
+        REQUIRE positive offline-calibrated zeta or complete offline calibration settings.
+        REQUIRE zeta frozen during main training.
+        REQUIRE generalized-impedance composition, units, and time-varying inputs.
+        REQUIRE total-margin balancing and nonnegative-margin policies.
+        REQUIRE IPF initialization, tolerance, iteration limit, and failure policy.
+        REQUIRE distribution AE architecture and pretraining artifact identity.
+    END IF
+    IF path_encoder_enabled OR service_encoder_enabled:
+        REQUIRE their complete input layouts and latent dimensions.
+        REQUIRE reconstruction-pretraining artifacts and fine-tuning registration.
+    END IF
+    IF path_encoder_enabled:
+        REQUIRE the utility parameter state used to create path pretraining matrices.
+    END IF
+    IF the utility layer is trainable:
+        REQUIRE documented feature units and initial coefficients.
+        COMPARE reported rounded station/transfer values with paper_settings.
+        RECORD supplied numerical precision rather than asserting original exact values.
+    END IF
+    PHASE 3: Check the selected entrypoint's parameters.
+    IF mode=train:
+        REQUIRE model architecture and every active component dimension.
+        REQUIRE positive batch size, epoch limit, optimizer, and optimizer parameters.
+        REQUIRE an explicit cfg.train.start_epoch and a positive cfg.train.epochs count.
+        REQUIRE cfg.train.target_multiplicity and observation_policy for the objective index.
+        STORE optimizer-specific options in cfg.train.optimizer_parameters.
+        REJECT inconsistent duplicate learning-rate values instead of choosing silently.
+        THEN inject canonical cfg.train.base_lr into cfg.train.optimizer_parameters.learning_rate explicitly.
+        REQUIRE the OD objective estimator, target-matrix multiplicity and sampling/accumulation policy.
+        These are needed for OD-only training too; generation-specific scale/epoch settings remain conditional.
+        REQUIRE a declared sampler random stream and immutable canonical sample-order identity.
+        REQUIRE cfg.train.run_kind is search_trial or full_training.
+        KEEP trial epoch limits distinct from the declared full-training epoch limit.
+        REQUIRE declared random seed policy and environment provenance.
+        REQUIRE schedule, gradient clipping, and stopping policies, including explicit none choices.
+        REQUIRE validation MAE selection and deterministic checkpoint tie handling.
+        REQUIRE every strictly lower validation MAE can replace the best checkpoint.
+        USE any min_delta only for patience accounting, not to suppress a lower-MAE checkpoint.
+        REQUIRE test data excluded from tuning and checkpoint selection.
+    END IF
+    IF mode in {train,evaluate,tune} OR (mode=experiment AND experiment_kind in
+        {benchmark,ablation,sensitivity} AND the selected learner uses the sequence-forecast interface):
+        REQUIRE cfg.model.zero_start_representation in {model_scale_zero,flow_scale_zero}.
+        Carry the supplied zero-start representation into both training and checkpoint evaluation.
+        REQUIRE checkpoint/training configuration to agree on this choice.
+    END IF
+    IF mode=evaluate:
+        REQUIRE selected checkpoint and matching config/model/schema identities.
+        REQUIRE restored scalers and preprocessing maps.
+        REQUIRE autoregressive inference without future OD labels.
+        REQUIRE genuine sample IDs, masks, expected counts, and horizon timestamps.
+        REQUIRE per-horizon metrics followed by the declared mean over horizons.
+        REQUIRE WMAPE denominator-zero policy and percentage metadata.
+        REQUIRE output-nonnegativity behavior from the saved model, not a new plot-time rule.
+    END IF
+    IF mode=tune:
+        REQUIRE entrypoint=bayes_study,task mode=tune and separate study_mode.
+        Keep search/train/search_train dispatch local to the study entry point.
+        REQUIRE a declared study identity and storage/artifact location.
+        IF study_mode in {search,search_train}:
+            REQUIRE search-space distributions and trial-isolation settings.
+            COMPARE disclosed search fields to paper_settings.hyperparameter_search.
+            REQUIRE sampler/pruner options and report cadence explicitly.
+            REQUIRE the declared trial limit and per-trial epoch limit.
+            REQUIRE intermediate validation reporting and pruning behavior.
+        END IF
+        IF study_mode in {train,search_train}:
+            REQUIRE compatible selected-study parameters and explicit final-configuration paths.
+            REQUIRE each final config's full-training budget,optimizer,stopping and checkpoint rules.
+            For train-only dispatch require an existing finite completed selected trial.
+        END IF
+    END IF
+    IF mode=diagnostic_export OR cfg explicitly requests diagnostic exports:
+        REQUIRE actual epoch/step axes and metric definitions.
+        REQUIRE prediction/checkpoint provenance and selected OD mapping identities.
+        REQUIRE output paths and figure format settings.
+    END IF
+    IF mode is experiment:
+        REQUIRE the complete protocol from the corresponding experiments/*.pseudo contract.
+        REQUIRE external baseline adapters when that experiment requests unavailable learners.
+        REQUIRE case flags, target/sample identities, tuning policy, and measured/reference separation.
+        IF experiment_kind is operational_assessment:
+            REQUIRE canonical same-forward assignment_context_by_step with exact incidence.
+            REQUIRE sampling/annotation data, independent calibration, and declared alignment functions.
+            REQUIRE cohort trajectory, Gaussian support, headway conversion, and snapshot matching policies.
+            REQUIRE all unresolved dependencies to fail readiness before numerical postprocessing.
+        END IF
+    END IF
+    PHASE 4: Return readiness.
+    report <- {errors:errors,unresolved:unresolved,deviations:declared_deviations,
+        resolved_component_context:context,artifact_state:artifact_state}.
+    report.ready_to_build <- errors is empty AND all build inputs/parameters are resolved.
+    report.ready_for_forecasting <- errors is empty AND unresolved is empty
+        AND every consumed model artifact is RESOLVED.
+    RETURN report.
+END PROCEDURE
+
+PROCEDURE expose_args(args)
+    INPUT already parsed and validated args.
+    PARAMETERS args.
+    OUTPUT explicit compatibility object for original callers.
+    PROVIDE config_filename and only the declared caller-required fields.
+    For bayes_study expose entrypoint,mode=tune,study_mode,FINAL_CONFIG_FILES and study options.
+    For main_training expose entrypoint,mode=train,config_filename,resume_checkpoint.
+    For checkpoint_evaluation expose entrypoint,mode=evaluate,config_filename and checkpoint/split fields.
+    PASS the object into entry routines or a scoped run context.
+    Pass this args record to the selected entrypoint.
+    Create a separate configuration copy for each trial.
+    RETURN the immutable or isolated args record.
+END PROCEDURE
+
+PROCEDURE RESOLVE_COMPONENT_CONTEXT(cfg)
+    INPUT model variant and domain_knowledge component switches.
+    PARAMETERS versioned legacy-alias table; cfg.generic_exogenous_contract.
+    OUTPUT independent ComponentContext with dependency predicates and legacy aliases.
+    context <- an empty record.
+    FOR name IN [generation_guidance,trip_distribution,traffic_assignment,depart_freq,
+        history_distribution,path_outputs,generic_exogenous_enabled]:
+        values <- all explicitly supplied canonical/alias values for name.
+        IF values disagree: RETURN CONFIGURATION_ERROR(name,values).
+        context[name] <- the unique supplied value required by the variant.
+    END FOR
+    IF context.generic_exogenous_enabled:
+        generic_contract <- cfg.generic_exogenous_contract.
+        Check its input_schema,encoder_spec,factory and output_field.
+        context.generic_exogenous_contract <- generic_contract.
+        context.generic_dependencies <- generic_contract.input_schema.raw_dependencies.
+    ELSE:
+        context.generic_dependencies <- empty set.
+    END IF
+    context.generation_inputs_required <- context.generation_guidance OR context.trip_distribution.
+    context.path_inputs_required <- context.traffic_assignment OR context.path_outputs.
+    context.service_inputs_required <- context.depart_freq OR context.path_inputs_required
+        OR ('raw_service' IN context.generic_dependencies).
+    context.path_encoder_enabled <- context.traffic_assignment.
+    context.service_encoder_enabled <- context.depart_freq.
+    context.path_outputs_requested <- context.path_outputs.
+    context.four_step_method_included <- context.generation_inputs_required.
+    context.history_distribution_included <- context.history_distribution.
+    context.traffic_assignment_included <- context.traffic_assignment.
+    context.depart_freq_included <- context.depart_freq.
+    IF context.generation_inputs_required:
+        context.generation_covariates <- cfg.domain_knowledge.generation_covariates.
+    END IF
+    RETURN context.
+END PROCEDURE
+
+PROCEDURE ASSESS_ARTIFACT_READINESS(artifacts,context,invocation)
+    INPUT expected artifact records with producer stage, consumers, schema, dependencies and paths.
+    PARAMETERS stage action BUILD / REUSE_VERIFIED / DISABLED_BY_MODEL_VARIANT.
+    OUTPUT registry, errors, unresolved dependencies and pending build steps.
+    registry <- empty mapping; errors <- []; unresolved <- []; pending <- [].
+    required <- artifact records consumed by the selected mode and active context.
+    Order required records by their producer dependency graph.
+    FOR each requirement IN required:
+        action <- requirement.stage_action.
+        IF action=DISABLED_BY_MODEL_VARIANT:
+            errors.APPEND(requirement.name + ' is consumed by an active component').
+        ELSE IF action=BUILD AND invocation.mode=prepare:
+            Check source input schemas, build parameters and upstream BUILD/REUSE contracts.
+            registry[requirement.name] <- {state:PLANNED_PENDING,schema:requirement.schema}.
+            pending.APPEND(requirement.build_step).
+        ELSE IF invocation.mode=tune AND requirement.depends_on_sampled_dimension:
+            Check its complete trial-specific pretraining plan.
+            registry[requirement.name] <- {state:PLANNED_PENDING,plan:requirement.build_step}.
+            pending.APPEND(requirement.build_step).
+        ELSE IF requirement is a fresh-training OD/frequency transform:
+            Check its training-only fit source, axes and preprocessing policy.
+            registry[requirement.name] <- {state:FIT_BEFORE_MODEL_CONSTRUCTION,fit:requirement.fit_plan}.
+        ELSE:
+            manifest <- READ_MANIFEST(requirement.path).
+            Compare content hash, schema, axis order, fit period and upstream dependency IDs.
+            IF all comparisons agree:
+                registry[requirement.name] <- {state:RESOLVED,manifest:manifest}.
+            ELSE:
+                unresolved.APPEND(requirement.name and failed comparison details).
+            END IF
+        END IF
+    END FOR
+    RETURN {registry:registry,errors:errors,unresolved:unresolved,pending:pending}.
+END PROCEDURE
+
+MODULE_FLOW:
+    Script boundary parses arguments once.
+    Configuration loading validates against the selected task and paper reference.
+    Each trial or evaluation receives an isolated resolved configuration.
+    The resolved configuration and source hash travel with produced artifacts.

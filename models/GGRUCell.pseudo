@@ -1,0 +1,101 @@
+MODULE models.GGRUCell
+PURPOSE Legacy relation-mixture recurrent alternative.
+PAPER Section 4.8 uses GATRU; this alternative has a retained-state gate.
+INPUT Node features[V_total,D], relation weights[E,num_relations], hidden[V_total,h].
+OUTPUT Emitted and carried recurrent states.
+PARAMETERS Two relation-convolution stacks and three width-h biases.
+
+PROCEDURE zoneout(prev_h, next_h, rate, training=true)
+    IF rate=0: RETURN next_h.
+    IF rate=1: RETURN prev_h.
+    IF training:
+        mask <- BERNOULLI(rate,SHAPE(prev_h)).
+        RETURN mask*prev_h+(1-mask)*next_h.
+    ELSE:
+        RETURN rate*prev_h+(1-rate)*next_h.
+    END IF.
+END PROCEDURE
+
+CLASS KStepRGCN
+    PARAMETERS rgcn_layers[K] and intermediate scalar PReLU slope.
+END CLASS
+
+PROCEDURE KStepRGCN.__init__(in_channels, out_channels, num_relations, num_bases, K, bias, options)
+    STORE in_channels,out_channels,K.
+    rgcn_layers <- empty registered list.
+    FOR depth=0..K-1:
+        input_width <- in_channels if depth=0, otherwise out_channels.
+        APPEND RGCNConv(input_width,out_channels,num_relations,num_bases,bias,options)
+            to rgcn_layers.
+    END FOR.
+    learned_PReLU_slope <- INITIALIZE(options.activation_initializer).
+    REGISTER all convolution parameters and learned_PReLU_slope.
+    RETURN this stack.
+END PROCEDURE
+
+PROCEDURE KStepRGCN.forward(x, edge_index, edge_attr)
+    current <- x.
+    FOR depth=0..K-1:
+        current <- rgcn_layers[depth].forward(current,edge_index,edge_attr,edge_norm=absent).
+        IF depth<K-1:
+            current <- MAX(current,0)+learned_PReLU_slope*MIN(current,0).
+        END IF.
+    END FOR.
+    RETURN current.
+END PROCEDURE
+
+CLASS GGRUCell
+    PARAMETERS cheb_i:D->3h, cheb_h:h->3h, bias_i[h],bias_r[h],bias_n[h].
+    STATE Relation order, dropout type/rate and legacy_retention_gate convention.
+END CLASS
+
+PROCEDURE GGRUCell.__init__(in_channels, out_channels,
+    dropout_type=absent, dropout_prob=0, num_relations=3, num_bases=3,
+    K=1, num_nodes=154, global_fusion=false, options=absent)
+    D,h <- in_channels,out_channels.
+    RESOLVE named options over the explicit compatibility arguments.
+    IF global_fusion: RAISE Error(unsupported_global_fusion).
+    IF dropout_type is outside {absent,dropout,zoneout} OR dropout_prob<0 OR dropout_prob>1:
+        RAISE Error(invalid_state_regularization).
+    END IF.
+    cheb_i <- KStepRGCN(D,3h,num_relations,num_bases,K,false,options).
+    cheb_h <- KStepRGCN(h,3h,num_relations,num_bases,K,false,options).
+    ALLOCATE and REGISTER bias_i[h],bias_r[h],bias_n[h] and both stacks.
+    gate_convention <- legacy_retention_gate.
+    reset_parameters().
+    RETURN this cell.
+END PROCEDURE
+
+PROCEDURE GGRUCell.reset_parameters()
+    bias_i,bias_r,bias_n <- ones[h],ones[h],ones[h].
+    RETURN this initialized parameter state.
+END PROCEDURE
+
+PROCEDURE GGRUCell.forward(inputs, edge_index, edge_attr, hidden=absent)
+    IF hidden is absent: hidden <- zeros[V_total,h] on inputs.device with inputs.dtype.
+    CHECK hidden's shape and node order match inputs.
+    i_r,i_i,i_n <- SPLIT(cheb_i.forward(inputs,edge_index,edge_attr),three width-h blocks).
+    h_r,h_i,h_n <- SPLIT(cheb_h.forward(hidden,edge_index,edge_attr),three width-h blocks).
+    reset_gate <- SIGMOID(i_r+h_r+bias_r).
+    retention_gate <- SIGMOID(i_i+h_i+bias_i).
+    candidate <- TANH(i_n+reset_gate*h_n+bias_n).
+    raw_next <- (1-retention_gate)*candidate+retention_gate*hidden.
+    IF dropout_type=zoneout:
+        carried <- zoneout(hidden,raw_next,dropout_prob,training_mode).
+    ELSE IF dropout_type=dropout AND training_mode:
+        IF dropout_prob>=1: RAISE Error(invalid_state_dropout).
+        carried <- BERNOULLI(1-dropout_prob,SHAPE(raw_next))*raw_next/(1-dropout_prob).
+    ELSE:
+        carried <- raw_next.
+    END IF.
+    RETURN raw_next,carried.
+END PROCEDURE
+
+PROCEDURE GGRUCell.state_contract(saved_state, runtime_batch)
+    CHECK saved stack, bias and PReLU shapes, relation order, K and gate_convention.
+    hidden <- runtime_batch.hidden if present, otherwise absent.
+    CHECK hidden-state segmentation against runtime_batch.ptr.
+    IF runtime_batch begins a new sequence: hidden <- absent.
+    RETURN {parameters:saved_state.parameters,hidden,layout:runtime_batch.layout}.
+END PROCEDURE
+END MODULE

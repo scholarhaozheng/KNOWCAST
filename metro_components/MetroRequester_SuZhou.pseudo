@@ -1,0 +1,115 @@
+MODULE MetroRequester_SuZhou
+PURPOSE Load a station registry, line sequences, directed adjacency and geographic distances.
+PAPER Sections 4.5–4.8 and 5.1.1.
+
+PROCEDURE haversine_distance(lat_lng_1, lat_lng_2)
+    INPUT two [latitude_degrees,longitude_degrees] pairs.
+    OUTPUT geographic distance in kilometres.
+    CHECK finite coordinates with latitude in [-90,90] and longitude in [-180,180]
+    (lat1,lon1,lat2,lon2) <- CONVERT degrees to radians
+    dlat <- lat2-lat1
+    dlon <- lon2-lon1
+    a <- sin(dlat/2)^2 + cos(lat1)*cos(lat2)*sin(dlon/2)^2
+    a <- CLAMP a to [0,1]
+    central_angle <- 2*atan2(sqrt(a),sqrt(1-a))
+    RETURN 6371.0*central_angle
+END PROCEDURE
+
+PROCEDURE request_suzhou_metro_data(excel_path, graph_sz_conn_root,
+                                    station_index_root, station_manager_dict_root,
+                                    result_API_root; network_schema)
+    INPUT ordered-line workbook and existing station/coordinate-results workbook.
+    INPUT output paths and schema for names, coordinates, line IDs, blanks, directions and serialization.
+    OUTPUT (station_manager,line_manager), with saved network bundle receipts.
+    table <- READ excel_path without interpreting row zero as a table header
+    coordinates <- READ result_API_root columns station_name,latitude,longitude
+    coordinates <- NORMALIZE station names using network_schema.aliases
+    CHECK each canonical name has compatible coordinates under the supplied tolerance
+    station_manager <- StationManager()
+    line_manager <- LineManager()
+    next_index <- 0
+    FOR EACH column in network_schema.declared_line_order:
+        line_id <- NORMALIZE table[0,column]
+        cells <- table[1..end,column]
+        IF column is wholly empty:
+            CONTINUE
+        END IF
+        CHECK line_id is present and resolves through network_schema.line_manifest
+        FOR EACH cell in cells, top to bottom:
+            IF cell matches network_schema.empty_sentinels:
+                IF cell is trailing padding or a declared formatting spacer:
+                    CONTINUE
+                END IF
+                RAISE UnresolvedInteriorLineGap(line_id,cell.position)
+            END IF
+            name <- NORMALIZE cell using network_schema.aliases
+            lat_lng <- coordinates[name]
+            CHECK lat_lng exists and matches the declared geographic coordinate system
+            existed <- name in station_manager.stations
+            station <- station_manager.add_station(name,line_id,next_index,lat_lng)
+            line_manager.add_line(line_id,station)
+            IF NOT existed:
+                next_index <- next_index + 1
+            END IF
+        END FOR
+    END FOR
+
+    station_order <- Stations sorted by global index
+    N <- length(station_order)
+    adjacency <- zeros[N,N]
+    line_sections <- empty set
+    FOR EACH line_id,line in line_manager.lines:
+        FOR j from 0 through length(line.stations)-1:
+            line.stations[j].station_sequence_of_the_line[line_id] <- j
+        END FOR
+        FOR EACH consecutive (source,target) in line.stations:
+            (u,v) <- source.index,target.index
+            CHECK u != v
+            FOR EACH direction in network_schema.allowed_directions(line_id,u,v):
+                (from,to) <- ORIENT (u,v) using direction
+                adjacency[from,to] <- 1
+                ADD (from,to,line_id) to line_sections
+            END FOR
+        END FOR
+    END FOR
+    line_manager.adj_mx <- adjacency
+    line_manager.station_sequence <- station_order IDs
+    line_manager.line_sections <- line_sections
+    station_manager.index_station <- INVERT station_manager.station_index
+    distance <- zeros[N,N]
+    FOR u from 0 through N-1:
+        FOR v from u+1 through N-1:
+            distance[u,v] <- haversine_distance(station_order[u].lat_lng,station_order[v].lat_lng)
+            distance[v,u] <- distance[u,v]
+        END FOR
+    END FOR
+    station_manager.station_distance_matrix <- distance
+    station_manager.distance_units <- geographic_distance_km
+
+    bundle_id <- version derived from inputs, schema and axis manifests
+    station_manager.network_manifest_id <- bundle_id
+    line_manager.topology_version <- bundle_id
+    station_payload <- convert_objects_to_dict(station_manager;network_schema.serialization_policy)
+    graph_payload <- {adjacency,line_sections,station_order,line_order,bundle_id}
+    index_payload <- {station_index=station_manager.station_index,
+                        index_station=station_manager.index_station,bundle_id}
+    CHECK station indices span 0..N-1, forward/inverse maps agree and line-local positions match
+    receipts <- WRITE graph_payload, index_payload and station_payload to their declared paths
+    REGISTER shared bundle_id, source versions, coordinate units and serialization schema in each receipt
+    IF any write fails:
+        RAISE NetworkBundleWriteFailure(receipts)
+    END IF
+    station_manager.network_manifest_id <- bundle_id
+    line_manager.topology_version <- bundle_id
+    station_manager.print_all_info()
+    line_manager.print_all_info()
+    RETURN (station_manager,line_manager) with receipts
+END PROCEDURE
+
+PROCEDURE network_loader_example(configuration)
+    INPUT configured input/output locations and network_schema.
+    OUTPUT loader result.
+    paths <- RESOLVE the five configured locations
+    RETURN request_suzhou_metro_data(paths.excel,paths.graph,paths.index,paths.manager,paths.coordinates;
+                                        configuration.network_schema)
+END PROCEDURE

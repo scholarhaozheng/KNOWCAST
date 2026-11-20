@@ -1,0 +1,114 @@
+MODULE fit_trip_distribution_model
+PURPOSE Calibrate the fixed deterrence coefficient and balance gravity flows at each time.
+PAPER Section 4.4, Eq. (20).
+
+PROCEDURE impedance_function(C, gamma; support_mask, numerical_policy)
+    INPUT C[N,N] in declared generalized-cost units, positive gamma, permitted OD support.
+    OUTPUT f[N,N].
+    CHECK gamma > 0 and allowed costs are finite
+    f <- zeros[N,N]
+    FOR EACH allowed (m,n):
+        f[m,n] <- exp(-gamma*C[m,n])
+    END FOR
+    IF numerical range requires stabilization:
+        f <- numerical_policy.equivalent_stable_representation(C,gamma,support_mask)
+    END IF
+    RETURN f
+END PROCEDURE
+
+PROCEDURE compute_flow(O, D, C, gamma, a=ABSENT, b=ABSENT; support_mask, ipf_policy)
+    INPUT nonnegative O[N], D[N], C[N,N], fixed gamma and optional initial factors.
+    INPUT ipf_policy: stopping precision, iteration bound and numerical handling.
+    OUTPUT {q[N,N], a[N], b[N], status, marginal_residuals}.
+    REMOVE declared singleton axes from O and D
+    CHECK all margins are finite and nonnegative
+    IF totals differ beyond ipf_policy.total_precision:
+        RETURN {status=UNBALANCED_MARGINS}
+    END IF
+    IF sum(O)=0 and sum(D)=0:
+        RETURN {q=zeros[N,N], a=zeros[N], b=zeros[N], status=CONVERGED, marginal_residuals=0}
+    END IF
+    f <- impedance_function(C,gamma;support_mask,ipf_policy.numerical_policy)
+    active_origins <- indices where O > 0
+    active_destinations <- indices where D > 0
+    CHECK every positive margin has permitted support
+    a <- supplied positive active factors or ipf_policy.initial_factors; zero on inactive origins
+    b <- supplied positive active factors or ipf_policy.initial_factors; zero on inactive destinations
+    FOR iteration from 0 through ipf_policy.max_iterations-1:
+        FOR EACH m in active_origins:
+            denominator <- sum over n of b[n]*D[n]*f[m,n]
+            IF denominator <= 0 or is nonfinite:
+                RETURN {status=INFEASIBLE_OR_NUMERICAL_FAILURE, iteration, m}
+            END IF
+            a[m] <- 1/denominator
+        END FOR
+        FOR EACH n in active_destinations:
+            denominator <- sum over m of a[m]*O[m]*f[m,n]
+            IF denominator <= 0 or is nonfinite:
+                RETURN {status=INFEASIBLE_OR_NUMERICAL_FAILURE, iteration, n}
+            END IF
+            b[n] <- 1/denominator
+        END FOR
+        q[m,n] <- a[m]*O[m]*b[n]*D[n]*f[m,n] for every pair
+        marginal_residuals <- {row_sums(q)-O, column_sums(q)-D}
+        IF ipf_policy.converged(marginal_residuals):
+            RETURN {q,a,b,status=CONVERGED,marginal_residuals}
+        END IF
+    END FOR
+    RETURN {q,a,b,status=NOT_CONVERGED,marginal_residuals}
+END PROCEDURE
+
+PROCEDURE objective_function(params, O_data, D_data, C_data, q_obs_data, time_steps;
+                                calibration_policy, support_mask, ipf_policy)
+    INPUT aligned training sequences, positive-parameter representation and calibration policies.
+    OUTPUT {objective, diagnostics, status}.
+    zeta <- calibration_policy.decode_positive_parameter(params)
+    errors <- empty list
+    diagnostics <- empty list
+    FOR t from 0 through time_steps-1:
+        C_t <- C_data[t], or the matrix declared invariant over these times
+        result <- compute_flow(O_data[t],D_data[t],C_t,zeta;support_mask,ipf_policy)
+        APPEND result.status and marginal_residuals to diagnostics
+        IF result.status != CONVERGED:
+            RETURN calibration_policy.failed_evaluation(diagnostics)
+        END IF
+        error_t <- calibration_policy.loss(result.q,q_obs_data[t],support_mask)
+        APPEND (error_t,calibration_policy.time_weight[t]) to errors
+    END FOR
+    objective <- calibration_policy.reduce(errors)
+    RETURN {objective,diagnostics,status=VALID}
+END PROCEDURE
+
+PROCEDURE fit_trip_distribution_model(O_data, D_data, C_data, q_obs_data, time_steps;
+                                        initial_gamma, lr_gener, maxiter,
+                                        calibration_policy, support_mask, ipf_policy)
+    INPUT aligned training-only arrays and explicit objective, optimizer and stopping settings.
+    OUTPUT (optimal_gamma, a_by_time, b_by_time, q_predicted_list), with calibration metadata.
+    CHECK nonempty aligned data, initial_gamma > 0 and maxiter > 0
+    params <- calibration_policy.encode_positive_parameter(initial_gamma)
+    optimizer <- calibration_policy.initialize_optimizer(params, real(lr_gener))
+    IF optimizer uses gradients:
+        SELECT the declared derivative method through impedance and converged IPF
+    END IF
+    history <- empty list
+    FOR iteration from 0 through maxiter-1:
+        evaluation <- objective_function(params,O_data,D_data,C_data,q_obs_data,time_steps;
+                                        calibration_policy,support_mask,ipf_policy)
+        APPEND {iteration,params,evaluation} to history
+        IF calibration_policy.should_stop(history):
+            BREAK
+        END IF
+        params <- optimizer.update(params,evaluation)
+    END FOR
+    optimal_gamma <- calibration_policy.select_parameter(history)
+    FREEZE optimal_gamma for subsequent main training and inference
+    a_by_time, b_by_time, q_predicted_list <- empty timestamp-keyed collections
+    FOR t from 0 through time_steps-1:
+        C_t <- C_data[t], or its declared invariant matrix
+        result <- compute_flow(O_data[t],D_data[t],C_t,optimal_gamma;support_mask,ipf_policy)
+        CHECK result.status=CONVERGED
+        a_by_time[t],b_by_time[t],q_predicted_list[t] <- result.a,result.b,result.q
+    END FOR
+    SAVE training fit range, cost units, support, policies, history and convergence diagnostics
+    RETURN (optimal_gamma,a_by_time,b_by_time,q_predicted_list)
+END PROCEDURE

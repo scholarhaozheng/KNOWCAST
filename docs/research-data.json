@@ -1,0 +1,629 @@
+{
+  "paper": {
+    "title": "KNOWCAST: Domain-knowledge-integrated deep learning for metro OD forecasting and path flow estimation",
+    "authors": [
+      {
+        "name": "Hao Zheng",
+        "affiliation": "Tsinghua University",
+        "email": "zhengh22@mails.tsinghua.edu.cn"
+      },
+      {
+        "name": "Han Zheng",
+        "affiliation": "Beijing Jiaotong University",
+        "email": "han_zheng@bjtu.edu.cn",
+        "corresponding": true
+      },
+      {
+        "name": "George Giannopoulos",
+        "affiliation": "Aristotle University of Thessaloniki (emeritus)",
+        "email": "ggian@academyofathens.gr"
+      }
+    ],
+    "journal": "Transportation Research Part C: Emerging Technologies",
+    "volume": 189,
+    "year": 2026,
+    "article": "105710",
+    "doi": "10.1016/j.trc.2026.105710",
+    "code": "https://github.com/scholarhaozheng/KNOWCAST",
+    "received": "2025-07-15",
+    "revised": "2026-03-17",
+    "accepted": "2026-04-15",
+    "availableOnline": "2026-05-15",
+    "dataAvailability": "Data will be made available on request.",
+    "funding": "Talent Fund of Beijing Jiaotong University, Grant No. 2024XKRC055"
+  },
+  "dataset": {
+    "city": "City S (anonymized)",
+    "region": "Eastern China",
+    "stations": 154,
+    "interchanges": 17,
+    "potentialODEntries": 23716,
+    "intervalMinutes": 15,
+    "lines": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "4 branch",
+      "5"
+    ],
+    "train": [
+      "2023-03-01",
+      "2023-03-31"
+    ],
+    "excluded": "April 2023",
+    "validation": [
+      "2023-05-01",
+      "2023-05-10"
+    ],
+    "test": [
+      "2023-05-11",
+      "2023-05-20"
+    ],
+    "dimensionRetention": 0.23,
+    "effectiveTrainingPoints": "over 16 million",
+    "catchmentMeters": 800
+  },
+  "table2": [
+    [
+      "OD Matrix Dimension Retention Ratio",
+      "0.23 (fixed)",
+      "—"
+    ],
+    [
+      "alpha_decay",
+      "{0.01, 0.05, 0.1, 0.2, 0.5}",
+      "0.1"
+    ],
+    [
+      "Base learning rate",
+      "[1e-5, 1e-2] log-uniform",
+      "0.00653"
+    ],
+    [
+      "Dropout probability",
+      "[0.0,0.5] uniform",
+      "0.442"
+    ],
+    [
+      "RNN hidden units",
+      "{64,96,128,192}",
+      "96"
+    ],
+    [
+      "GAT feature dimension",
+      "{256,512,768}",
+      "256"
+    ],
+    [
+      "Trip generation-informed loss weight",
+      "[1e-5,1e-1] log-uniform",
+      "0.0264"
+    ],
+    [
+      "Additional distribution dim",
+      "{2,3,4,5}",
+      "5"
+    ],
+    [
+      "Additional section feature dim",
+      "{5,6,7,8}",
+      "6"
+    ]
+  ],
+  "table3": [
+    [
+      "LSTM",
+      1.41,
+      6.48,
+      76.36
+    ],
+    [
+      "DCRNN",
+      1.49,
+      8.12,
+      80.69
+    ],
+    [
+      "GConvGRU",
+      1.48,
+      7.65,
+      80.15
+    ],
+    [
+      "GConvLSTM",
+      1.36,
+      5.61,
+      73.65
+    ],
+    [
+      "GCLSTM",
+      1.38,
+      5.95,
+      74.73
+    ],
+    [
+      "LRGCN",
+      1.38,
+      5.79,
+      74.73
+    ],
+    [
+      "TGCN",
+      1.38,
+      6.04,
+      74.73
+    ],
+    [
+      "A3T-GCN",
+      1.46,
+      6.61,
+      79.06
+    ],
+    [
+      "AGCRN",
+      1.36,
+      5.61,
+      73.65
+    ],
+    [
+      "STConv",
+      1.5,
+      6.95,
+      81.23
+    ],
+    [
+      "KNOWCAST",
+      1.02,
+      3.04,
+      54.25
+    ]
+  ],
+  "table4": [
+    [
+      "2b",
+      "GATRU",
+      "Yes",
+      "No",
+      "Yes",
+      "Yes (trainable)",
+      "Yes",
+      "Yes"
+    ],
+    [
+      "2c",
+      "GATRU",
+      "Yes",
+      "Yes (Temporal Only)",
+      "Yes",
+      "Yes (trainable)",
+      "Yes",
+      "Yes"
+    ],
+    [
+      "3",
+      "GATRU",
+      "Yes",
+      "No",
+      "No",
+      "—",
+      "No",
+      "No"
+    ],
+    [
+      "3b",
+      "GATRU",
+      "Yes",
+      "Components 2–5 replaced by generic MLP"
+    ],
+    [
+      "4",
+      "GATRU",
+      "Yes",
+      "Yes",
+      "No",
+      "No",
+      "No",
+      "No"
+    ],
+    [
+      "5",
+      "GATRU",
+      "Yes",
+      "No",
+      "Yes",
+      "No",
+      "No",
+      "No"
+    ],
+    [
+      "6",
+      "GATRU",
+      "Yes",
+      "No",
+      "No",
+      "No",
+      "No",
+      "Yes"
+    ],
+    [
+      "7",
+      "GATRU",
+      "Yes",
+      "No",
+      "No",
+      "Yes (fixed)",
+      "Yes",
+      "No"
+    ],
+    [
+      "8",
+      "GATRU",
+      "Yes",
+      "No",
+      "No",
+      "Yes (trainable)",
+      "Yes",
+      "No"
+    ],
+    [
+      "9",
+      "GConvLSTM",
+      "Yes",
+      "No",
+      "No",
+      "—",
+      "No",
+      "No"
+    ],
+    [
+      "10",
+      "GConvLSTM",
+      "Yes",
+      "Yes",
+      "No",
+      "No",
+      "No",
+      "No"
+    ],
+    [
+      "11",
+      "GConvLSTM",
+      "Yes",
+      "No",
+      "Yes",
+      "No",
+      "No",
+      "No"
+    ],
+    [
+      "12",
+      "GConvLSTM",
+      "Yes",
+      "No",
+      "No",
+      "No",
+      "No",
+      "Yes"
+    ],
+    [
+      "13",
+      "GConvLSTM",
+      "Yes",
+      "No",
+      "No",
+      "Yes (fixed)",
+      "Yes",
+      "No"
+    ]
+  ],
+  "table5": [
+    [
+      "2b — without Trip Generation",
+      1.02,
+      3.06,
+      54.27
+    ],
+    [
+      "2c — Temporal Only",
+      1.02,
+      3.08,
+      54.42
+    ],
+    [
+      "3 — Base GATRU",
+      1.24,
+      5.19,
+      67.15
+    ],
+    [
+      "3b — GATRU + MLP",
+      1.21,
+      4.85,
+      65.53
+    ],
+    [
+      "4 — Trip generation",
+      1.22,
+      5.12,
+      66.07
+    ],
+    [
+      "5 — Trip distribution",
+      1.14,
+      3.64,
+      61.74
+    ],
+    [
+      "6 — Departure frequency",
+      1.21,
+      4.2,
+      65.53
+    ],
+    [
+      "7 — Fixed path utility",
+      1.19,
+      3.92,
+      64.44
+    ],
+    [
+      "8 — Trainable path utility",
+      1.1,
+      3.45,
+      59.57
+    ],
+    [
+      "9 — GConvLSTM baseline",
+      1.35,
+      5.58,
+      73.1
+    ],
+    [
+      "10 — GConvLSTM + trip generation",
+      1.35,
+      5.57,
+      72.64
+    ],
+    [
+      "11 — GConvLSTM + trip distribution",
+      1.24,
+      4.41,
+      67.15
+    ],
+    [
+      "12 — GConvLSTM + departure frequency",
+      1.32,
+      5.32,
+      73.01
+    ],
+    [
+      "13 — GConvLSTM + fixed path utility",
+      1.31,
+      4.66,
+      70.94
+    ]
+  ],
+  "table6": [
+    [
+      "2 — Full Features",
+      1.138,
+      4.401,
+      58.11
+    ],
+    [
+      "2b — without Trip Generation",
+      1.277,
+      5.729,
+      65.2
+    ],
+    [
+      "2c — Temporal Only",
+      1.221,
+      5.927,
+      62.39
+    ]
+  ],
+  "table7": [
+    [
+      "9",
+      "GConvLSTM",
+      22.5,
+      1250
+    ],
+    [
+      "3",
+      "Base GATRU",
+      24.9,
+      1351
+    ],
+    [
+      "3b",
+      "GATRU + Generic MLP",
+      28.7,
+      1485
+    ],
+    [
+      "2",
+      "KNOWCAST",
+      43.8,
+      2150
+    ]
+  ],
+  "table8": [
+    [
+      "JL → M",
+      "1",
+      46.87,
+      11.8,
+      22.76,
+      0.863
+    ],
+    [
+      "SRS → SJ",
+      "2",
+      57.57,
+      19.13,
+      23.27,
+      0.78
+    ],
+    [
+      "SW → S",
+      "3",
+      57.49,
+      19.33,
+      21.23,
+      0.926
+    ],
+    [
+      "H → Q",
+      "4",
+      73.13,
+      37.68,
+      25.75,
+      0.916
+    ],
+    [
+      "N → X",
+      "5",
+      73.15,
+      34.4,
+      28.19,
+      0.865
+    ]
+  ],
+  "longTail": [
+    [
+      "Head",
+      6.2,
+      30,
+      47,
+      67,
+      68337,
+      1.75,
+      28.52
+    ],
+    [
+      "Body",
+      37.5,
+      50,
+      70.4,
+      111.1,
+      1384986,
+      0.74,
+      22.37
+    ],
+    [
+      "Tail",
+      56.3,
+      20,
+      95.4,
+      142.5,
+      4361831,
+      0.1,
+      8.52
+    ]
+  ],
+  "taskSensitivity": [
+    [
+      "history 2 / forecast 4",
+      1.3,
+      4.7,
+      61.89
+    ],
+    [
+      "history 4 / forecast 12",
+      1.6,
+      8,
+      74.55
+    ],
+    [
+      "retain 15% dimension",
+      0.86,
+      2.65,
+      43.67
+    ],
+    [
+      "retain 80% dimension",
+      1.72,
+      9.41,
+      77.94
+    ]
+  ],
+  "figures": [
+    [
+      "1",
+      6,
+      "Conceptual roadmap"
+    ],
+    [
+      "2",
+      7,
+      "Knowledge integration methodology"
+    ],
+    [
+      "3",
+      8,
+      "KNOWCAST Seq2Seq architecture"
+    ],
+    [
+      "4",
+      10,
+      "KITP core architecture"
+    ],
+    [
+      "5",
+      17,
+      "OD–path–section tripartite graph"
+    ],
+    [
+      "6",
+      21,
+      "Dynamic metro headways"
+    ],
+    [
+      "7",
+      23,
+      "Bayesian optimization progress"
+    ],
+    [
+      "8",
+      24,
+      "Convergence curves"
+    ],
+    [
+      "9",
+      25,
+      "Validation metrics"
+    ],
+    [
+      "10",
+      26,
+      "Multi-horizon OD predictions"
+    ],
+    [
+      "11",
+      27,
+      "Long-tail segmented errors"
+    ],
+    [
+      "12",
+      30,
+      "Learned parameter trajectories"
+    ],
+    [
+      "13",
+      30,
+      "Breakpoint detection"
+    ],
+    [
+      "14",
+      30,
+      "Section flow density and Sankey"
+    ],
+    [
+      "15",
+      31,
+      "Estimated versus observed train loads"
+    ]
+  ]
+}

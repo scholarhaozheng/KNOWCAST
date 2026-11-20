@@ -1,0 +1,90 @@
+MODULE Generating_logit_probabilities
+PURPOSE Compute offline path and directed section probability artifacts.
+PAPER Eqs. (21)–(24); model training recomputes probabilities using its current utility parameters.
+
+PROCEDURE calculate_logit_probabilities(paths_info; declared_probability_context)
+    INPUT candidate records for one OD/time and a declared utility/feasibility context.
+    OUTPUT {path_records, status, feasible_set_id, context}.
+    context <- declared_probability_context
+    copies <- detached copies of paths_info in candidate order
+    IF context.variant=legacy_fixed_station_transfer:
+        beta <- {station:-1, transfer:-3}
+        features <- legacy station and transfer counts under their recorded definitions
+    ELSE IF context.variant=paper_initialization_reference:
+        beta <- context.recorded_initial_coefficients
+        features <- Eq. (21) path features aligned to this service/time context
+    ELSE:
+        RAISE UnknownProbabilityVariant
+    END IF
+    feasible <- nonpadding, connected, fully available candidate indices
+    IF any candidate has unresolved service support:
+        RETURN context.missing_support_policy.resolve(copies)
+    END IF
+    IF feasible is empty:
+        RETURN context.empty_set_policy.result(copies, status=UNASSIGNABLE)
+    END IF
+    utility[r] <- sum over phi of beta[phi]*features[r,phi] for r in feasible
+    CHECK feasible utilities are finite
+    maximum <- max utility over feasible
+    weight[r] <- exp(utility[r]-maximum) IF r in feasible ELSE 0
+    probability[r] <- weight[r]/sum(weight)
+    FOR EACH candidate r:
+        copies[r].probability <- probability[r]
+        copies[r].utility <- utility[r] when feasible
+        copies[r].context <- context
+    END FOR
+    RETURN {path_records=copies,status=VALID,feasible_set_id,context}
+END PROCEDURE
+
+PROCEDURE Generating_logit_probabilities(train_dict_file_path, OD_path_visit_prob_dic_file_path,
+                                            station_manager_dict_file_path, graph_sz_conn_root,
+                                            station_manager_dict_root, station_index_root, result_API_root;
+                                            declared_probability_context)
+    INPUT candidate catalog, station artifact, output path and probability context.
+    INPUT remaining locations are retained call-site aliases.
+    OUTPUT {records, artifact, incidence_artifact}.
+    stations <- load_network_records(station_manager_dict_file_path, expected schema/IDs, trust policy)
+    catalog <- load_network_records(train_dict_file_path, expected schema/IDs, trust policy)
+    records <- empty OD-keyed mapping
+    incidences <- empty mapping
+    FOR EACH (m,n), candidates in catalog.OD_path_dic:
+        result <- calculate_logit_probabilities(candidates;declared_probability_context)
+        IF result.status != VALID:
+            records[(m,n)] <- result status and context with unavailable section probabilities
+            CONTINUE
+        END IF
+        physical_probability <- empty mapping with default zero
+        line_probability <- empty mapping with default zero
+        incidence <- empty set of (path_id,source,target)
+        FOR EACH path in result.path_records:
+            physical_sections <- empty set
+            line_sections <- empty set
+            FOR EACH route in path.routes:
+                CHECK route continuity with the preceding route
+                FOR EACH consecutive (u,v) in route.stations:
+                    CHECK directed support on route.line_number
+                    ADD (u,v) to physical_sections
+                    ADD (u,v,route.line_number) to line_sections
+                END FOR
+            END FOR
+            FOR EACH (u,v) in physical_sections:
+                ADD (path.id,u,v) to incidence
+                physical_probability[(u,v)] += path.probability
+            END FOR
+            FOR EACH section in line_sections:
+                line_probability[section] += path.probability
+            END FOR
+        END FOR
+        od <- OD(m,n)
+        od.sec_vst_freq_dic <- physical_probability
+        od.pass_sections_list <- one Section per line_probability key with visit_prob and context
+        od.probability_context <- result.context
+        CHECK physical probabilities lie in [0,1] within declared numerical precision
+        records[(m,n)] <- od
+        incidences[(m,n)] <- {entries=incidence,shape=[candidate_count,N,N],path_ids,station_order_id}
+    END FOR
+    payload <- convert_objects_to_dict(records;declared serialization policy)
+    artifact <- WRITE payload to OD_path_visit_prob_dic_file_path with context and axis IDs
+    incidence_artifact <- SAVE incidences when requested
+    RETURN {records,artifact,incidence_artifact}
+END PROCEDURE

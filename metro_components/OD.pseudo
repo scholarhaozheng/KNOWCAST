@@ -1,0 +1,38 @@
+MODULE OD
+PURPOSE Store a directed real-station OD identity and conditional section annotations.
+PAPER Sections 4.5 and 4.7.
+
+CLASS OD
+    STATE start_station_name, terminal_station_name
+    STATE sec_vst_freq_dic, pass_sections_list, probability_context
+END CLASS
+
+PROCEDURE OD.__init__(start_station_name, terminal_station_name)
+    INPUT two real endpoints in the same station manifest.
+    OUTPUT an OD record.
+    CHECK both endpoints are real stations
+    self.start_station_name <- start_station_name
+    self.terminal_station_name <- terminal_station_name
+    self.sec_vst_freq_dic <- empty mapping
+    self.pass_sections_list <- empty list
+    self.probability_context <- UNCOMPUTED
+    FREEZE the ordered endpoint identity
+    RETURN self
+END PROCEDURE
+
+PROCEDURE OD.__hash__()
+    INPUT immutable OD endpoint identity.
+    OUTPUT hash value.
+    RETURN HASH((self.start_station_name,self.terminal_station_name))
+END PROCEDURE
+
+PROCEDURE OD.__eq__(other)
+    INPUT candidate record.
+    OUTPUT Boolean or NOT_COMPARABLE.
+    IF other is not an OD record:
+        RETURN NOT_COMPARABLE
+    END IF
+    CHECK enclosing station manifests agree
+    RETURN (self.start_station_name,self.terminal_station_name)
+            = (other.start_station_name,other.terminal_station_name)
+END PROCEDURE

@@ -1,0 +1,74 @@
+MODULE models.rgcn
+PURPOSE Legacy basis-decomposed relation-mixture graph convolution.
+PAPER Relational alternative retained separately from Eq. (31)'s graph attention.
+INPUT x[V,I], edges[2,E], relation coefficients[E,R_rel], optional edge_norm[E].
+OUTPUT Node features[V,O].
+PARAMETERS basis[B_basis,I,O], att[R_rel,B_basis], root[I,O], optional bias[O].
+
+CLASS RGCNConv
+    AGGREGATION Sum messages by destination, then add the node's root contribution.
+    Relation identifiers are converted to one-hot coefficients; supplied mixtures retain their weights.
+END CLASS
+
+PROCEDURE RGCNConv.__init__(in_channels, out_channels, num_relations, num_bases, bias=true, extra_options)
+    I,O,R_rel,B_basis <- in_channels,out_channels,num_relations,num_bases.
+    ALLOCATE and REGISTER basis[B_basis,I,O],att[R_rel,B_basis],root[I,O].
+    bias_parameter <- REGISTER empty[O] if bias, otherwise absent.
+    node_axis,edge_flow <- 0,source_to_destination.
+    reset_parameters().
+    RETURN this operator.
+END PROCEDURE
+
+PROCEDURE RGCNConv.reset_parameters()
+    basis,att,root <- XAVIER_UNIFORM at their existing shapes using the configured random stream.
+    IF bias_parameter is present: bias_parameter <- zeros[O].
+    RETURN this initialized parameter state.
+END PROCEDURE
+
+PROCEDURE RGCNConv.forward(x, edge_index, edge_attr, edge_norm=absent)
+    IF x is absent: RAISE Error(missing_node_features).
+    CHECK edge endpoints are in [0,V) and edge metadata has E matching rows.
+    IF edge_attr contains integer relation IDs:
+        edge_attr <- ONE_HOT(edge_attr,R_rel).
+    END IF.
+    source_indices <- edge_index.source.
+    source_features <- GATHER(x,source_indices).
+    messages <- message(source_features,source_indices,edge_attr,edge_norm).
+    aggregate <- zeros[V,O].
+    FOR e=0..E-1:
+        aggregate[edge_index.destination[e]] <- aggregate[edge_index.destination[e]]+messages[e].
+    END FOR.
+    RETURN update(aggregate,x).
+END PROCEDURE
+
+PROCEDURE RGCNConv.message(x_j, edge_index_j, edge_attr, edge_norm)
+    INPUT Gathered source features[E,I]; source IDs retain alignment.
+    relation_transform <- RESHAPE(att*RESHAPE(basis,[B_basis,I*O]),[R_rel,I,O]).
+    messages <- zeros[E,O].
+    FOR e=0..E-1:
+        FOR relation=0..R_rel-1:
+            messages[e,:] <- messages[e,:]+edge_attr[e,relation]*(x_j[e,:]*relation_transform[relation]).
+        END FOR.
+        IF edge_norm is present: messages[e,:] <- edge_norm[e]*messages[e,:].
+    END FOR.
+    RETURN messages.
+END PROCEDURE
+
+PROCEDURE RGCNConv.update(aggr_out, x)
+    out <- aggr_out+x*root.
+    IF bias_parameter is present: out <- out+bias_parameter.
+    RETURN out[V,O].
+END PROCEDURE
+
+PROCEDURE RGCNConv.__repr__()
+    RETURN FORMAT("RGCNConv",I,O,R_rel,B_basis).
+END PROCEDURE
+
+PROCEDURE RGCNConv.validate_checkpoint(saved_state, architecture_manifest)
+    expected <- {basis:[B_basis,I,O],att:[R_rel,B_basis],root:[I,O],bias:construction_bias_shape}.
+    IF saved parameter names/shapes or relation order differ from expected:
+        RAISE Error(incompatible_relational_checkpoint).
+    END IF.
+    RETURN saved_state.parameters.
+END PROCEDURE
+END MODULE

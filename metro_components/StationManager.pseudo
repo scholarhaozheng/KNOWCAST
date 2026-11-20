@@ -1,0 +1,68 @@
+MODULE StationManager
+PURPOSE Maintain a canonical station registry with bijective matrix-axis indices.
+PAPER Shared station axes in Sections 4.3–4.8.
+
+CLASS StationManager
+    STATE stations: canonical name -> Station
+    STATE station_index: name -> global index
+    STATE index_station: global index -> name
+    STATE station_names, station_distance_matrix, network_manifest_id
+END CLASS
+
+PROCEDURE StationManager.__init__()
+    INPUT none.
+    OUTPUT an empty registry.
+    self.stations, self.station_index, self.index_station <- empty mappings
+    self.station_names <- empty set
+    self.station_distance_matrix <- UNBUILT
+    self.network_manifest_id <- UNASSIGNED
+    RETURN self
+END PROCEDURE
+
+PROCEDURE StationManager.add_station(name, line, station_index, lat_lng)
+    INPUT source name, line ID, proposed index and coordinates; loader alias/coordinate policy.
+    OUTPUT canonical Station.
+    name <- NORMALIZE name using the alias manifest
+    IF name exists in self.stations:
+        station <- self.stations[name]
+        IF station coordinates are missing and lat_lng is valid:
+            station.lat_lng <- lat_lng
+            station.coordinate_status <- known
+        ELSE:
+            CHECK coordinates agree within the declared tolerance
+        END IF
+        station.add_line(line)
+        RETURN station
+    END IF
+    CHECK station_index is a nonnegative integer absent from self.index_station
+    station <- Station(name,station_index,lat_lng)
+    station.add_line(line)
+    self.stations[name] <- station
+    self.station_index[name] <- station_index
+    self.index_station[station_index] <- name
+    ADD name to self.station_names
+    self.station_distance_matrix <- UNBUILT
+    RETURN station
+END PROCEDURE
+
+PROCEDURE StationManager.print_station_info(name, index)
+    INPUT canonical name and caller's expected index.
+    OUTPUT station diagnostic.
+    IF name is absent from self.stations:
+        RETURN EMIT {name, status=UNKNOWN_STATION}
+    END IF
+    station <- self.stations[name]
+    RETURN EMIT {name, index=station.index, expected_index=index,
+                    index_matches=(index=station.index), lines=station.lines}
+END PROCEDURE
+
+PROCEDURE StationManager.print_all_info()
+    INPUT current registry.
+    OUTPUT station diagnostics and physical-station count.
+    diagnostics <- empty list
+    FOR EACH station in self.stations ordered by global index:
+        APPEND self.print_station_info(station.name,station.index) to diagnostics
+    END FOR
+    CHECK counts of stations, station_names and both index maps agree
+    RETURN EMIT {diagnostics, physical_station_count=length(self.stations)}
+END PROCEDURE

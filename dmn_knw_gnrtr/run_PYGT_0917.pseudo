@@ -1,0 +1,96 @@
+MODULE run_PYGT_0917
+PURPOSE Independent pretraining of production or attraction estimation.
+PAPER Sections 4.3.1-4.3.2; Section 4.4 input-margin requirements.
+
+PROCEDURE run_PYGT
+    INPUT base_dir, prefix, str_prdc_attr.
+    INPUT RGCN_node_features, RGCN_hidden_units, RGCN_output_dim, RGCN_K.
+    INPUT lr, epoch_num, train_ratio.
+    INPUT L_h, L_f, pretraining settings, split manifest, and output policy.
+    INPUT optional signal_artifact already prepared for this task.
+    OUTPUT fitted task-specific generation checkpoint and training report.
+    REQUIRE prefix denotes the authorized generation-training data.
+    MAP legacy prdc/attr to canonical production/attraction; accept canonical names directly.
+    REQUIRE exactly one of those two canonical task identities.
+    REQUIRE lr is finite and strictly positive.
+
+    REQUIRE epoch_num is a declared positive limit.
+    REQUIRE 0 < train_ratio < 1 if an internal temporal holdout is requested.
+    signal <- signal_artifact IF supplied ELSE LOAD prefix_task_signal_dict.
+    VALIDATE feature schema, timestamp order, station order, and graph identity.
+    READ features, targets, additional_feature, edge_index, and edge_weight.
+    window_bundle <- build_generation_windows(signal,L_h,L_f,configured forecast_origins,sequence_policy).
+    examples <- window_bundle.examples.
+    IF internal holdout is selected:
+        SELECT chronological fitting and holdout subsets with disjoint target intervals.
+    ELSE:
+        USE the declared fitting set and external validation protocol or explicit no-validation policy.
+    END IF
+    CHECK boundary windows against the declared split policy.
+    DISTINGUISH this internal holdout from the paper's final test split.
+    VERIFY normalization was fitted only on the designated fitting subset.
+    IF normalization provenance is incompatible:
+        REBUILD the transform and features from retained raw covariates.
+    END IF
+    STORE a holdout and its task/transform manifest only when that evaluation set exists.
+    estimator <- RecurrentGCN using the supplied dimensions and feature schema.
+    DECLARE the Seq2Seq wrapper required by the paper's generation estimator.
+    VERIFY model output shape against one symbolic example.
+    INITIALIZE the chosen optimizer over the declared generation parameters.
+    RECORD optimizer choice and all supplied settings.
+    FOR epoch from first through epoch_num:
+        ENTER training mode.
+        INITIALIZE epoch_squared_error_sum <- 0.
+        INITIALIZE epoch_target_count <- 0.
+        INITIALIZE nonzero_relative_error_sum <- 0.
+        INITIALIZE nonzero_target_count <- 0.
+        FOR EACH chronological sequence or declared independent minibatch:
+            RESET recurrent context at independent sample boundaries.
+            CLEAR accumulated gradients at the declared update boundary.
+            forecast <- forecast_sequence(estimator, current sample's complete auxiliary context).
+            estimates <- forecast.values; target_times <- forecast.target_times.
+            ALIGN estimates and labels by target time and station index.
+            IF one output per station is configured:
+                USE prediction[N] and target[N], or both [N,1].
+            END IF
+            INVERT target normalization before original-scale diagnostics.
+            COMPUTE the declared supervised pretraining loss.
+            LEGACY LOSS OPTION: mean squared error over valid corresponding targets.
+            BACKPROPAGATE through the generation estimator and its temporal state graph.
+            APPLY the optimizer update under the declared accumulation policy.
+            IF truncated backpropagation is selected:
+                DETACH hidden states only at documented truncation boundaries.
+            END IF
+            ADD this batch's squared-error sum to epoch_squared_error_sum.
+            ADD its number of valid target entries to epoch_target_count.
+            FOR EACH nonzero valid target:
+                ADD absolute error divided by absolute target to nonzero_relative_error_sum.
+                INCREMENT nonzero_target_count.
+            END FOR
+        END FOR
+        IF epoch_target_count is zero:
+            STOP with an empty-training-data failure.
+        END IF
+        epoch_MSE <- epoch_squared_error_sum / epoch_target_count.
+        IF nonzero_target_count > 0:
+            epoch_nonzero_MAPE <- 100 * nonzero_relative_error_sum / nonzero_target_count.
+        ELSE:
+            epoch_nonzero_MAPE <- UNDEFINED.
+        END IF
+        REPORT correctly named MSE and nonzero-target MAPE diagnostics.
+        RUN the declared validation procedure without updates only when validation is configured.
+        APPLY the explicit checkpoint-selection and stopping rule if configured.
+    END FOR
+    SELECT the final artifact under the declared pretraining selection rule.
+    SAVE str_prdc_attr_RecurrentGCN_model with its complete model state.
+    RECORD canonical task identity and any legacy prdc/attr artifact-name alias explicitly.
+    SAVE task-specific hyperparameters and architecture metadata.
+    INCLUDE node_features, hidden_units, output_dim, and diffusion order.
+    INCLUDE L_h, L_f, station order, feature order, and normalization identifiers.
+    INCLUDE activation, output constraints, recurrent reset, and decoder policies.
+    INCLUDE fit/holdout time ranges, optimizer settings, and selected epoch.
+    INCLUDE training diagnostics and checkpoint provenance.
+    PROVIDE a legacy hyperparameters alias only if it unambiguously names this task.
+    VERIFY the artifact can reconstruct the declared estimator schema.
+    RETURN checkpoint receipt and training report.
+END PROCEDURE

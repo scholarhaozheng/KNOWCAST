@@ -1,0 +1,27 @@
+{
+  "artifact_kind": "independent_formula_reference_checks",
+  "executed_pseudocode": false,
+  "numerical_oracles_passed": 5,
+  "checks": [
+    {
+      "name": "deterministic_half_open_bin",
+      "status": "passed"
+    },
+    {
+      "name": "gaussian_cdf_interval_mass",
+      "status": "passed"
+    },
+    {
+      "name": "discarded_negative_tail_is_accounted",
+      "status": "passed"
+    },
+    {
+      "name": "conditional_kernel_finite_grid_tail",
+      "status": "passed"
+    },
+    {
+      "name": "entry_quadrature_and_mass_ledger",
+      "status": "passed"
+    }
+  ]
+}

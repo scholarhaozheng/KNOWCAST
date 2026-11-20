@@ -1,0 +1,71 @@
+MODULE Route
+PURPOSE Construct the shortest eligible contiguous same-line segment between endpoints.
+PAPER Candidate route features in Section 4.5.
+
+CLASS Route
+    STATE from_stop, to_stop, line_number, stops, stations, start_index, end_index, valid
+    STATE _track_changes: optional diagnostics flag
+END CLASS
+
+PROCEDURE Route.__init__()
+    INPUT none.
+    OUTPUT an unconstructed Route.
+    self.from_stop, self.to_stop, self.line_number <- UNSET
+    self.start_index, self.end_index <- UNSET
+    self.stops <- INFINITY
+    self.valid <- false
+    self.stations <- empty list
+    self._track_changes <- false
+    RETURN self
+END PROCEDURE
+
+PROCEDURE Route.__setattr__(name, value)
+    INPUT field and replacement value.
+    OUTPUT updated field and optional diagnostic.
+    tracking <- READ _track_changes through direct storage
+    IF tracking AND name != _track_changes:
+        EMIT {field=name, value_summary=bounded summary using station IDs}
+    END IF
+    DIRECT_STORE(self,name,value)
+    RETURN self
+END PROCEDURE
+
+PROCEDURE Route.construct_route(line_manager, station_manager, from_station, to_station, lines)
+    INPUT canonical endpoints, candidate lines and current network managers.
+    OUTPUT this Route with valid=true or an explicit invalid reason.
+    self.stations <- empty list
+    self.line_number <- UNSET
+    self.stops <- INFINITY
+    self.valid <- false
+    self.from_stop, self.to_stop <- endpoint names
+    self.start_index, self.end_index <- endpoint global indices
+    best <- NONE
+    FOR EACH line_id in distinct lines, in declared tie order:
+        sequence <- line_manager.lines[line_id].stations
+        start <- occurrence of from_station in sequence
+        finish <- occurrence of to_station in sequence
+        IF either endpoint is absent:
+            CONTINUE
+        END IF
+        IF either endpoint has multiple occurrences:
+            RAISE EndpointOccurrenceError
+        END IF
+        step <- +1 IF finish >= start ELSE -1
+        stations <- inclusive sequence from start to finish using step
+        IF any consecutive pair lacks directed support on line_id:
+            CONTINUE
+        END IF
+        candidate <- {line_id, stations, hops=abs(finish-start)}
+        IF best=NONE OR candidate.hops < best.hops:
+            best <- candidate
+        END IF
+    END FOR
+    IF best=NONE:
+        RETURN self with reason=NO_ELIGIBLE_SAME_LINE_SEGMENT
+    END IF
+    self.stations <- best.stations
+    self.line_number <- best.line_id
+    self.stops <- best.hops
+    self.valid <- true
+    RETURN self
+END PROCEDURE

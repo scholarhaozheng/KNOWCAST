@@ -1,0 +1,275 @@
+MODULE bayes_opt
+EDITION paper-aligned reconstruction; NON-EXECUTABLE PSEUDOCODE
+PURPOSE resumable hyperparameter search, validation-only selection, progress figures,
+                and full-training dispatch for one or more configurations
+PAPER Section 5.1.4 and Table 2, PDF p. 22
+DEPENDENCIES train_save_history.pseudo; specs/paper_settings.yaml
+
+SEARCH CONTRACT
+    Entry point is bayes_study with task mode tune and separate study_mode in search,train,search_train.
+    There is no work at import time; study_mode is an explicit invocation argument.
+    Study direction is minimize validation MAE on the original flow scale.
+    Persist trials and state in a named SQLite study.
+    Sampler family is TPE; pruner family is MedianPruner.
+    Reported study has 80 trials, with at most 40 epochs per trial.
+    Exact sampler parameters, pruner warmup/report cadence and seeds are unresolved.
+    Store declared reconstruction choices instead of calling library defaults paper values.
+    The paper's Trial 78 is a reported label, not a trial to force to win a new search.
+    New searches need not reproduce its score or selected parameters.
+    Never tune hyperparameters, stop trials or select checkpoints using test metrics.
+
+SEARCH SPACE
+    alpha_decay: categorical {0.01,0.05,0.1,0.2,0.5}.
+    base_lr: log-uniform real in [0.00001,0.01].
+    dropout_prop: uniform real in [0,0.5].
+    rnn_units: categorical {64,96,128,192}.
+    channel: categorical {256,512,768}.
+    PINN_value: log-uniform real in [0.00001,0.1].
+    additional_distribution_dim: integer categorical {2,3,4,5}.
+    additional_section_feature_dim: integer categorical {5,6,7,8}.
+    Legacy 'PINN_value' maps to the generation-consistency initial weight w0.
+    Legacy 'channel' maps to GAT feature dimension, not number of attention heads.
+    Each parameter must map to an actual model/loss setting consumed during training.
+
+PROCEDURE plot_bayes_search(csv_path,save_path=None,dpi=600)
+    INPUT csv_path, save_path=None, dpi=600.
+    PARAMETERS None.
+    OUTPUT progress figure receipt and best completed-trial record.
+    Read a tabular export including number, value, state and trial parameters.
+    REQUIRE unique integer trial numbers and a known minimization objective.
+    Sort rows by trial number, retaining failed/pruned rows for audit metadata.
+    completed <- rows with state COMPLETE and finite objective value.
+    IF completed is empty:
+        Emit an explicit 'no completed finite trial' summary.
+        RETURN no_plot with audit metadata.
+    END IF
+    incumbent <- positive infinity.
+    FOR each completed trial in order:
+        incumbent <- minimum of previous incumbent and trial validation MAE.
+        Store incumbent as best_so_far at that completed trial number.
+    END FOR
+    best_row <- completed row with minimum value and declared deterministic tie rule.
+    Create an 8 by 4 inch figure, or a caller-declared publication size.
+    Configure a serif font with an available fallback and embeddable PDF font settings.
+    Plot completed trial validation MAE against actual trial number.
+    Plot nonincreasing best_so_far curve using the same trial-number positions.
+    Scatter and label the selected best completed trial.
+    Show failed/pruned trials as gaps in the value curve.
+    Label x-axis 'Trial' and y-axis 'Validation MAE (passengers per OD interval)'.
+    Title 'Bayesian Optimization Progress'; add legible legend.
+    Add annotation using point coordinates, with text inside the figure bounds.
+    Include study ID and run provenance in figure metadata or a sidecar.
+    IF save_path is supplied:
+        Resolve output path inside the study output directory.
+        Ensure extension agrees with declared figure format; default original export is PDF.
+        Save with embedded fonts and supplied dpi for any rasterized artists.
+        Close figure handles after saving in unattended runs.
+        Record source CSV hash and selected trial number.
+    ELSE:
+        RETURN figure object to the caller; display only when explicitly interactive.
+    RETURN figure artifact metadata and best completed trial record.
+END PROCEDURE
+
+PROCEDURE objective(trial)
+    INPUT trial.
+    PARAMETERS explicitly bound SearchContext and Table 2 parameter distributions.
+    OUTPUT best validation MAE for a completed trial.
+    Context is an explicitly bound SearchContext containing base_cfg and base_cfg_path, study directory,
+        sampler/reporting policy, artifact registry and training entry point.
+    REQUIRE STUDY_ENTRY has bound that context to this objective callback for this study.
+    cfg <- deep copy of context.base_cfg, already validated as a search template.
+    REQUIRE required dataset/artifact manifests are complete before sampling.
+    trial_directory <- allocate an exclusive run directory using context.study_id and trial.number.
+    cfg.mode <- train; cfg.train.run_kind <- search_trial.
+    cfg.train.log_dir <- trial_directory / 'training', a not-yet-created child directory.
+    Keep configuration files in the trial directory so _get_log_dir can create the empty training directory once.
+    cfg.train.trial_number <- trial.number.
+    cfg.train.base_lr <- trial.sample_log_uniform('base_lr',0.00001,0.01).
+    cfg.train.optimizer_parameters.learning_rate <- cfg.train.base_lr in the same sampled-parameter update.
+    cfg.model.dropout_prop <- trial.sample_uniform('dropout_prop',0,0.5).
+    cfg.model.rnn_units <- trial.sample_categorical('rnn_units',[64,96,128,192]).
+    cfg.model.channel <- trial.sample_categorical('channel',[256,512,768]).
+    cfg.model.PINN_value <- trial.sample_log_uniform('PINN_value',0.00001,0.1).
+    cfg.model.alpha_decay <- trial.sample_categorical('alpha_decay',
+        [0.01,0.05,0.1,0.2,0.5]).
+    cfg.model.additional_distribution_dim <- trial.sample_categorical(
+        'additional_distribution_dim',[2,3,4,5]).
+    cfg.model.additional_section_feature_dim <- trial.sample_categorical(
+        'additional_section_feature_dim',[5,6,7,8]).
+    cfg.train.epochs <- 40 as the maximum, not a forced run length after pruning.
+    cfg.evaluation.test_access <- disabled_during_search.
+    Resolve model-dimensional dependencies and validate all sampled values are consumed.
+    Prepare auxiliary encoder architectures compatible with sampled embedding dimensions.
+    Reuse cached pretraining only when its full architecture/training-data key matches.
+    Bind verified, dimension-compatible auxiliary artifacts and IDs into cfg.artifacts for this trial.
+    Validate the fully resolved cfg for entrypoint=main_training,mode=train after those bindings.
+    Keep RDS, split definition and evaluation policy identical across comparable trials.
+    Record sampler seed and training seed according to the declared trial seed policy.
+    resolved_config_path <- trial_directory / 'resolved_config.yaml'.
+    Write the exact resolved configuration persistently at resolved_config_path.
+    Write a temporary invocation config only if required by an executable adapter.
+    invocation <- {entrypoint:main_training,config_filename:resolved_config_path,
+        mode:train,resume_checkpoint:ABSENT}.
+    A fresh trial does not resume a different trial's checkpoint merely because the architecture matches.
+    callback <- MAKE_VALIDATION_CALLBACK(trial,context.reporting_policy,
+        first_epoch=cfg.train.start_epoch,max_epochs=cfg.train.epochs).
+    TRY:
+        training_result <- train_save_history.main(args=invocation,
+            validation_callback=callback,
+            allow_test_evaluation=false).
+        REQUIRE finite training_result.best_validation_mae.
+        REQUIRE selected checkpoint was determined by validation only.
+        Record checkpoint hash, best epoch and all immutable artifact IDs on trial.
+        objective_value <- training_result.best_validation_mae.
+    ON pruning:
+        Preserve PRUNED state and all available audit artifacts.
+        Preserve the pruned trial's state and recorded intermediate values.
+        Re-raise TrialPruned so the study records PRUNED rather than COMPLETE or FAIL.
+    ON training failure:
+        Record diagnostic and FAILED state; do not swallow invalid tensor/NaN failures.
+        Re-raise the original failure; only the study's explicit catch policy may continue other trials.
+    FINALLY:
+        Release model/device resources owned by this trial.
+        Remove only that trial's known temporary invocation file after path validation.
+        Preserve its resolved configuration, history and checkpoint manifests.
+    RETURN objective_value only on successful completion.
+END PROCEDURE
+
+PROCEDURE MAKE_VALIDATION_CALLBACK(trial,policy,first_epoch,max_epochs)
+    INPUT active trial and its reporting policy.
+    PARAMETERS first displayed epoch, maximum epoch count, report cadence and intermediate statistic.
+    OUTPUT callback(epoch,validation_mae,checkpoint_manifest).
+    completed <- 0; best_seen <- INFINITY.
+    DEFINE callback(epoch,validation_mae,checkpoint_manifest):
+        REQUIRE epoch=first_epoch+completed AND completed<max_epochs.
+        report_step <- completed; completed <- completed+1.
+        best_seen <- MIN(best_seen,validation_mae).
+        IF policy.intermediate_statistic=current_epoch:
+            intermediate_value <- validation_mae.
+        ELSE:
+            intermediate_value <- best_seen.
+        END IF
+        IF report_step matches policy.report_cadence:
+            trial.report(value=intermediate_value,step=report_step).
+            Append {report_step,epoch,checkpoint_manifest.epsilon,intermediate_value,checkpoint_manifest.id}
+                to this trial's progress log.
+            IF trial.should_prune():
+                Save the partial-history and best-checkpoint references.
+                RAISE TrialPruned.
+            END IF
+        END IF
+    END CALLBACK
+    RETURN callback.
+END PROCEDURE
+
+PROCEDURE STUDY_ENTRY(args)
+    INPUT normalized study invocation args.
+    PARAMETERS study identity, SQLite path, search budget and final-configuration paths.
+    OUTPUT study metadata and requested full-training results.
+    REQUIRE args.entrypoint=bayes_study and args.mode=tune after the configuration adapter.
+    mode <- args.study_mode; require mode in {search,train,search_train}.
+    base_cfg_path <- args.config_filename.
+    REQUIRE that explicit base configuration path; do not reinterpret main-training mode=train as a study mode.
+    base_cfg,config_provenance <- config.load_configuration(base_cfg_path,args.project_root,invocation=args).
+    Use tune/study_mode validation here; train-only dispatch must not require a new search sampler/pruner.
+    study_root <- validated base_cfg.base_dir / 'bayes_study'.
+    Create study_root if needed, without clearing existing study files.
+    storage_uri <- absolute SQLite database path under study_root.
+    study_id <- explicit stable study name tied to model family and data manifest.
+    Store dataset and objective signatures; obtain the search-space signature from the existing study in train-only mode.
+    IF mode includes search:
+        Compute and store the configured search-space signature before creating or resuming search.
+        IF a study already exists:
+            REQUIRE explicit resume semantics and matching signatures.
+            Restore trial records from SQLite and sampler/pruner state from their declared state artifacts.
+            A trial database alone is not proof that the sampler RNG trajectory was restored.
+            IF such state is unavailable, label resumed suggestions a new stochastic continuation.
+            Label continuation without a saved sampler state as a new stochastic continuation.
+        ELSE:
+            Create minimizing study with configured TPE and MedianPruner.
+        END IF
+        budget_semantics <- declared meaning of '80 trials' on resume.
+        For a fresh paper-scale reconstruction, allocate 80 attempted trial slots.
+        For resume, distinguish 80 total attempts from 80 additional attempts.
+        Count COMPLETE, PRUNED, FAILED and RUNNING states according to stored policy.
+        remaining <- declared total budget minus already-counted trials.
+        REQUIRE remaining >= 0 or explicitly report the study already exceeds budget.
+        Bind an immutable SearchContext to objective using the chosen adapter's closure mechanism.
+        Include base_cfg,base_cfg_path,study_id,study_root,reporting policy and artifact registry explicitly.
+        Optimize that bound objective for remaining slots, subject to declared resource/failure limits.
+        Use database locking appropriate for any concurrent workers.
+        Export number, state, value, sampled parameters, timings and error summaries.
+        Persist sampler/pruner state at declared consistent boundaries if exact resume is supported.
+        Save trials.csv atomically and record a snapshot ID.
+        plot_bayes_search(trials.csv,study_root/'bayes_progress.pdf').
+        Report best completed trial only when at least one valid trial exists.
+    END IF
+    IF mode includes train:
+        REQUIRE an existing compatible study containing a finite completed trial.
+        Load the selected best trial by the declared validation/tie rules.
+        configs <- args.FINAL_CONFIG_FILES if nonempty, otherwise [base_cfg_path].
+        REQUIRE all requested config paths exist and have unique resolved identities.
+        FOR each cfg_path in configs:
+            FULL_TRAIN_SELECTED_CONFIGURATION(cfg_path,best_trial,study_root).
+        END FOR
+    END IF
+    RETURN study metadata and any full-training results.
+END PROCEDURE
+
+PROCEDURE FULL_TRAIN_SELECTED_CONFIGURATION(cfg_path,best_trial,study_root)
+    INPUT cfg_path, best_trial, study_root.
+    PARAMETERS None.
+    OUTPUT full-training result and selected-checkpoint manifest.
+    cfg_train <- a fresh parse of this cfg_path.
+    original_epochs <- cfg_train.train.epochs.
+    REQUIRE original_epochs is explicitly supplied for this configuration.
+    Check model variant and feature switches are compatible with the searched study.
+    IF applying selected parameters to an ablation, label it a declared transfer policy.
+    Initialize replaced_params as an empty mapping.
+    PARAMETER MAP:
+        base_lr -> train.base_lr.
+        dropout_prop -> model.dropout_prop.
+        rnn_units -> model.rnn_units.
+        channel -> model.channel.
+        PINN_value -> model.PINN_value.
+        alpha_decay -> model.alpha_decay.
+        additional_distribution_dim -> model.additional_distribution_dim.
+        additional_section_feature_dim -> model.additional_section_feature_dim.
+    FOR each sampled key/value in best_trial.params:
+        REQUIRE key exists in parameter map.
+        destination <- parameter map[key].
+        replaced_params[key] <- {old_value: cfg_train[destination],new_value:value}.
+        cfg_train[destination] <- value.
+    END FOR
+    Validate all eight expected search keys exist in the selected trial.
+    cfg_train.train.optimizer_parameters.learning_rate <- cfg_train.train.base_lr atomically with selection.
+    Record the replaced optimizer rate too; no stale template rate may override the selected value.
+    Restore cfg_train.train.epochs <- original_epochs.
+    cfg_train.mode <- train and cfg_train.train.run_kind <- full_training.
+    Clear any inherited train.trial_number search-control field.
+    Store replaced_params, study ID, selected_trial_number and selection score under selection_provenance.
+    Set test access policy to after_selection only; do not inherit disabled-during-search ambiguously.
+    final_training_directory <- allocate a unique directory using config stem and run ID.
+    cfg_train.train.log_dir <- final_training_directory / 'training', initially absent.
+    Copy the source config under an unambiguous 'source_config' name.
+    Prepare matching auxiliary encoder artifacts for selected embedding dimensions.
+    Store their verified immutable references in cfg_train.artifacts.
+    resolved_config_path <- final_training_directory / 'resolved_config.yaml'.
+    Write the exact resolved config to that path after every selected parameter and artifact ID is resolved.
+    invocation <- {entrypoint:main_training,config_filename:resolved_config_path,
+        mode:train,resume_checkpoint:ABSENT}.
+    result <- train_save_history.main(args=invocation,validation_callback=ABSENT,
+        allow_test_evaluation=true).
+    REQUIRE training used validation-only checkpoint selection and sealed that choice before test access.
+    Save the full training result, artifact manifest and selected checkpoint hash.
+    RETURN result including best validation MAE and separately labeled test evaluation.
+END PROCEDURE
+
+REPORTED VALUES, NOT A RECONSTRUCTED SEARCH DATABASE
+    Reported trial label: 78.
+    Reported base_lr: 0.00653; dropout_prop: 0.442.
+    Reported rnn_units: 96; channel: 256.
+    Reported PINN_value: 0.0264; alpha_decay: 0.1.
+    Reported distribution dimension: 5; section feature dimension: 6.
+    Continuous values are rounded article values, not recovered full-precision parameters.
+    A 'reported settings' mode may supply these values directly, but must not fabricate trials.

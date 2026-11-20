@@ -1,0 +1,112 @@
+MODULE processing_sql
+PURPOSE Inspect AFC table schemas, combine approved source tables, and prepare date-range extracts.
+PAPER Section 5.1.1 data periods; Section 4.2.1 event-time observability.
+
+PROCEDURE main
+    INPUT script options and externally supplied database profile.
+    OUTPUT extraction receipts, schema report, and split manifest.
+    VALIDATE that selected modes have complete nonempty settings.
+    VALIDATE identifiers against the configured database/schema namespace.
+    REQUIRE every destination differs from every protected source table.
+    PARSE date bounds under date_semantics.
+    REQUIRE end date is not earlier than start date.
+    INITIALIZE connection and cursor handles as unopened.
+    TRY:
+        OPEN one connection using the external credential profile.
+        OPEN a cursor.
+        REPORT connection success without printing the connection object or secret.
+        READ source table schema metadata.
+        REPORT column names, data types, and date-field definitions.
+        VERIFY required journey and timestamp columns.
+        REQUIRE entry_time, origin code, exit_time, and destination code for full observability.
+        IF only aggregate final OD counts are available:
+            FLAG the source as insufficient for finished/unfinished reconstruction.
+        END IF
+        READ a bounded set of distinct service dates for schema validation.
+        REPORT date range and count without publishing raw journey rows.
+        IF combined_table is enabled:
+            REQUIRE at least one approved source table.
+            VERIFY source columns have compatible meanings and units.
+            VERIFY timestamp precision and station-code domains are compatible.
+            CREATE a staging destination using the declared schema.
+            FOR EACH approved source table:
+                COPY the declared canonical columns into staging.
+                RETAIN source-table provenance where required.
+            END FOR
+            APPLY the declared duplicate-journey policy across source tables.
+
+            VERIFY output row counts and timestamp bounds.
+            PUBLISH staging as combined_table_name under destination_policy.
+            RECORD the union source list and deduplication diagnostics.
+        END IF
+        IF date_filter_need is enabled:
+            FOR EACH requested service date d:
+                DERIVE the intended destination name using validated date formatting.
+                CALL extract_filtered_data for the single-date range [d,d].
+                RECORD the returned extraction receipt.
+            END FOR
+        END IF
+        IF date_filter_and_combine is enabled:
+            REQUIRE the range_jobs list contains actual configured jobs.
+            FOR EACH job in range_jobs:
+                CALL extract_filtered_data with that job's source and bounds.
+                STORE its declared role: training, validation, test, or history support.
+                RECORD the returned extraction receipt.
+            END FOR
+        END IF
+        VERIFY training, validation, and test target intervals are disjoint.
+        VERIFY target-period boundaries match the requested published-study setting.
+        STORE the split manifest and extraction diagnostics.
+    ON database or validation error:
+        ROLLBACK transactional changes where supported.
+        MARK any nontransactional staging outputs incomplete.
+        REPORT the failed stage without exposing query credentials or passenger identifiers.
+
+    FINALLY:
+        CLOSE cursor if it was opened.
+        CLOSE connection if it was opened.
+    END TRY
+    RETURN completed receipts and any failure statuses.
+END PROCEDURE
+
+PROCEDURE extract_filtered_data
+    INPUT cursor, conn, source_table_name, new_table_name, start_date, end_date.
+    INPUT column_contract, date_semantics, destination_policy.
+    OUTPUT extraction receipt and validation report.
+    CHECK source and destination identifiers are nonempty and distinct.
+    VERIFY both belong to the intended database scope.
+    VERIFY the source exists and has the required canonical columns.
+    PARSE the supplied date bounds.
+    TRANSLATE inclusive service-date bounds into an explicit timestamp selection.
+    IF the source field is a date:
+        SELECT dates from start_date through end_date inclusively.
+    ELSE IF the source field is a timestamp:
+        USE an equivalent start-inclusive, next-boundary-exclusive interval.
+        RESPECT the service timezone and any declared service-day rollover.
+    END IF
+    BIND date values as query parameters.
+    RESOLVE table identifiers from validated configuration, not arbitrary date text.
+    CREATE an empty staging table using the required source schema.
+    SELECT canonical journey fields within the requested entry-cohort date range.
+    PRESERVE exit events required to resolve those entry cohorts.
+    KEEP eventual exits after the entry-date range when completing entry-cohort labels.
+    COPY selected rows into staging.
+    COUNT selected source records and staged records.
+    VERIFY counts agree under the documented deduplication policy.
+    CHECK minimum and maximum selected entry times.
+    CHECK null counts in entry, exit, and station fields.
+    RECORD unresolved exits separately from missing extraction fields.
+    VERIFY station codes are retained without lossy numeric conversion.
+    RECORD table schema fingerprint and extraction time.
+    IF validation fails:
+        LEAVE existing published destination unchanged.
+        MARK staging invalid and return failure diagnostics.
+    END IF
+    IF new_table_name already exists:
+        APPLY the declared preserve/version/replace policy.
+    END IF
+    PUBLISH validated staging under the intended destination identity.
+    COMMIT when the database's operation semantics require it.
+    RECORD any DDL auto-commit behavior in the receipt.
+    RETURN source, destination, bounds, row count, schema version, and validation status.
+END PROCEDURE

@@ -1,0 +1,6 @@
+MODULE models
+PURPOSE Package containing the OD forecaster, graph recurrent cells and graph operators.
+PAPER KNOWCAST model algorithms; each component names its relevant equations.
+INPUT None.
+OUTPUT No package-level computation; construct the requested component explicitly.
+END MODULE

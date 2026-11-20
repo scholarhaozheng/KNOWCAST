@@ -1,0 +1,536 @@
+MODULE generating_array_OD
+PURPOSE AFC extraction, station reconciliation, OD construction, compression, windows, and historical references.
+PAPER Sections 3.2, 4.2.1-4.2.4; Equations (1)-(9); Section 4.3.2 Equation (15).
+
+SCHEMA
+    All software array indices are zero-based; station indices are 0..N-1.
+    Retained destination slots are 0..R-1; residual slot is R in width K=R+1.
+    Paper slot number k in 1..R maps to software slot k-1.
+    station_order: immutable list of N canonical station identifiers.
+    station_to_codes: canonical station index to distinct AFC station codes.
+    code_to_station: AFC station code to one canonical station index.
+    journey_id: stable identifier for deduplication; never published in output.
+    entry_time: actual tap-in timestamp with declared timezone.
+    exit_time: actual tap-out timestamp, possibly unresolved.
+    entry_interval: interval containing entry_time under declared boundary rules.
+    origin: canonical station known at entry.
+    destination: canonical station observed at exit.
+    count: passenger multiplicity; one for an individual journey.
+    resolved_records: records whose eventual destination is known offline.
+    observation_store: event-timed records accessible at a requested cutoff.
+    actual_by_time[t]: full raw OD labels [N,N].
+    label_completeness[t]: resolved-cohort status under the declared finalization policy.
+    production_by_time[t]: entry-cohort row totals [N].
+    attraction_by_time[t]: entry-cohort destination totals [N].
+    exit_clock_counts: separate operational statistic if required; not substituted for attraction_by_time.
+    split_manifest: train, validation, and test target-time membership.
+    sample_manifest: forecast origins and explicit input/target timestamps.
+    mapping_artifact: station order, RDS, residual sets, residual weights, fitting provenance.
+    availability_manifest: when each source observation became accessible.
+CONFIG
+    Invalid-journey handling and label-finalization policy require declaration.
+    Timezone, service-day rollover, interval closure, and boundary inclusion require declaration.
+    Missing-period handling is distinct from an observed zero-demand period.
+    The published study uses 15-minute intervals; other intervals are a changed task.
+    The retained integer dimension must be supplied explicitly.
+    No configuration value is inferred from an old filename.
+
+PROCEDURE generate_OD_DO_array
+    INPUT df: validated AFC journey or sufficient event-cohort records.
+    INPUT x_y_time: ordered requested entry intervals.
+    INPUT sz_conn_to_station_index: legacy name for station_to_codes.
+    INPUT station_index_to_sz_conn: legacy name for code_to_station.
+    INPUT base_dir, prefix: logical artifact destination and split identifier.
+    INPUT station_manager_dict_file_path: station-order artifact.
+    INPUT result_array_file_path: output artifact destination.
+    INPUT contract: event-time schema, split manifest, label resolution policy.
+    OUTPUT intermediate_dic: actual labels, independent totals, observation-store reference.
+    REQUIRE prefix is one declared dataset split.
+    REQUIRE output belongs to the intended dataset directory.
+    READ station manager artifact.
+    VERIFY canonical station indices are exactly 0..N-1 without gaps or duplicates.
+    VERIFY graph and AFC maps use that same order.
+    VALIDATE required event-time fields before grouping.
+    IF only final OD counts with entry time are present:
+        ALLOW construction of actual-demand labels.
+        MARK real-time finished/unfinished construction unavailable.
+    END IF
+    REMOVE or flag duplicate journey records under the declared policy.
+    RECONCILE AFC station codes with canonical station indices.
+    IF an observed code has multiple canonical destinations:
+        STOP with an ambiguous-mapping diagnostic.
+    END IF
+    GROUP resolved records by entry interval.
+    PREPARE an empty mapping actual_by_time.
+    PREPARE an empty mapping production_by_time.
+    PREPARE an empty mapping attraction_by_time.
+    PREPARE interval validity and discarded-record diagnostics.
+    FOR EACH requested interval t:
+        SUBMIT process_OD_array_of_each_timestamp(t) independently.
+        Parallel execution may change scheduling, not output ordering.
+    END FOR
+    COLLECT interval results keyed by timestamp.
+    SORT results by the declared time axis.
+    REQUIRE every requested interval has a result or an explicit missing marker.
+    FOR EACH valid interval result:
+        STORE actual OD in actual_by_time[t].
+        STORE the explicit singleton-column slice production[:,0] as production_by_time[t][N].
+        STORE attraction[:,0] as attraction_by_time[t][N], preserving the identical station order.
+        CHECK total production equals total attraction.
+        CHECK both equal total resolved passenger multiplicity.
+    END FOR
+    BUILD intermediate_dic.T_N_D_ODs from actual_by_time.
+    BUILD intermediate_dic.Trip_Production_In_Station_or_Out_Station from row totals.
+    BUILD intermediate_dic.Trip_Attraction_In_Station_or_Out_Station from column totals.
+    ADD station order, time axis, target definition, and split metadata.
+    ADD observation-store reference if event-time construction is supported.
+    ADD label completeness and unresolved-journey counts by entry cohort.
+
+    ADD validation diagnostics without passenger identifiers.
+    CALL save_to_pickle(intermediate_dic, result_array_file_path).
+    RETURN intermediate_dic.
+END PROCEDURE
+
+PROCEDURE generate_OD_DO_array.process_OD_array_of_each_timestamp
+    INPUT time: one requested entry interval.
+    CAPTURE grouped records and immutable station maps from outer procedure.
+    OUTPUT time, od_matrix[N,N], production[N,1], attraction[N,1].
+    INITIALIZE od_matrix with zero counts.
+    SELECT records entering during time.
+    IF the interval is missing rather than observed empty:
+        RETURN the declared missing-interval status.
+    END IF
+    FOR EACH resolved record in this interval:
+        MAP entry AFC code to origin m.
+        MAP exit AFC code to destination n.
+        CHECK both indices are valid.
+        CHECK count is finite and nonnegative.
+        CHECK exit_time is not earlier than entry_time when available.
+        ADD count to od_matrix[m,n].
+    END FOR
+    FOR EACH canonical station m:
+        production[m,0] <- SUM over n of od_matrix[m,n].
+    END FOR
+    FOR EACH canonical station n:
+        attraction[n,0] <- SUM over m of od_matrix[m,n].
+    END FOR
+    CHECK the counted record population agrees with the declared label policy.
+
+    RETURN time, od_matrix, production, attraction.
+END PROCEDURE
+
+PROCEDURE save_to_pickle
+    INPUT data: artifact payload with metadata.
+    INPUT filename: intended local destination.
+    OUTPUT write receipt or explicit failure.
+    NOTE the legacy name denotes serialization, not a required executable format.
+    VERIFY destination parent and write policy.
+    VERIFY payload schema before serialization.
+    WRITE to a temporary sibling artifact.
+    FINISH and close the serialization stream.
+    REOPEN the temporary artifact with the matching trusted reader.
+    VERIFY shape, key set, and version metadata.
+    PUBLISH the temporary artifact as the requested destination.
+    IF any stage fails:
+        CLOSE handles and retain an error diagnostic.
+    END IF
+    RETURN destination and payload summary.
+END PROCEDURE
+
+PROCEDURE print_array_info
+    INPUT array or structured artifact.
+    OUTPUT human-readable diagnostic only.
+    REPORT shape and axis names.
+    REPORT data type and finite-value status.
+    REPORT valid sample count and missing-sample count.
+    IF numeric:
+        REPORT minimum, maximum, and total where meaningful.
+    END IF
+    IF timestamp-indexed:
+        REPORT first and last timestamp and ordering validity.
+    END IF
+    REPORT aggregate diagnostics only.
+END PROCEDURE
+
+PROCEDURE generate_T_N_D_ODs
+    INPUT result_array_all[T,N,N]: actual or finished raw matrices.
+    INPUT top_D_stations: retained count R.
+    INPUT mapping_artifact: already fitted RDS for all origins.
+    OUTPUT result_array[T,N,R+1].
+    REQUIRE 0 <= R < N for the residual-slot formulation.
+    REQUIRE the mapping was fitted using training intervals only.
+    REQUIRE mapping station order matches input station order.
+    ALLOCATE result_array with the input count precision.
+    FOR EACH origin m:
+        retained <- mapping_artifact.RDS[m] in its stored order.
+        remaining <- mapping_artifact.residual_set[m].
+        CHECK retained contains R distinct valid destinations.
+        CHECK retained and remaining partition all N destinations.
+        INITIALIZE volume-coverage diagnostic accumulator.
+        FOR EACH interval t:
+            FOR retained slot k from 0 through R-1:
+                result_array[t,m,k] <- result_array_all[t,m,retained[k]].
+            END FOR
+            result_array[t,m,R] <- SUM raw flow over remaining.
+            CHECK compressed row total equals raw row total.
+            IF raw row total is positive:
+                RECORD explicitly retained volume divided by raw row total.
+            ELSE:
+                RECORD undefined volume share for that empty row.
+            END IF
+        END FOR
+        REPORT valid volume-share diagnostics separately from dimension ratio.
+    END FOR
+
+    RETURN result_array and optional coverage diagnostics.
+END PROCEDURE
+
+PROCEDURE fit_training_destination_mapping
+    INPUT training_actual[T_train,N,N], retained count R, station order.
+    OUTPUT mapping_artifact with RDS, residual sets, and residual weights.
+    REQUIRE every fitting timestamp belongs to the training period.
+    REQUIRE finite nonnegative counts and a declared completed-cohort fitting population.
+    REJECT unknown/unresolved destination labels represented as zeros in the ranking corpus.
+    FOR EACH origin m:
+        cumulative[n] <- SUM training_actual[:,m,n].
+        SORT destinations by descending cumulative flow.
+        RESOLVE ties using a documented deterministic convention.
+        RDS[m] <- first R destination identifiers.
+        residual_set[m] <- all other destination identifiers.
+        residual_total <- SUM cumulative[n] over residual_set[m].
+        SET residual weights for retained destinations to zero.
+        FOR EACH residual destination n:
+            IF residual_total > 0:
+                weight[m,n] <- cumulative[n] / residual_total.
+            ELSE:
+                weight[m,n] <- 1 / (N-R).
+            END IF
+        END FOR
+        CHECK residual weights sum to one.
+    END FOR
+    RECORD fitting time range and mapping version.
+    FREEZE the mapping for training, validation, and testing.
+    RETURN mapping_artifact.
+END PROCEDURE
+
+PROCEDURE time_in_interval
+    INPUT t: timestamp with a declared service timezone.
+    INPUT start, end: service-window clock boundaries.
+    OUTPUT outside_service_window: Boolean.
+    NOTE the retained legacy caller uses TRUE to reject a timestamp.
+    EXTRACT the clock portion of t in the service timezone.
+    IF start precedes end on the same day:
+        ACCEPT clock times inside the declared non-wrapping interval.
+    ELSE IF start follows end:
+        ACCEPT clock times from start through midnight and midnight through end.
+    ELSE:
+        REQUIRE an explicit all-day or empty-window interpretation.
+    END IF
+    APPLY the configured inclusion rule at exact boundaries.
+    RETURN NOT accepted.
+END PROCEDURE
+
+PROCEDURE build_sample_plan(interval_grid, split_manifest, sample_policy, L_h, L_f)
+    INPUT ordered interval starts, target split, service-window and boundary policy, independent lengths.
+    OUTPUT plan: ordered records {sample_id, forecast_origin, input_times, target_times}.
+    CHECK L_h > 0 and L_f > 0
+    delta <- sample_policy.interval_duration
+    plan <- empty list
+    FOR EACH t0 in interval_grid:
+        input_times <- [t0-L_h*delta, ..., t0-delta]
+        target_times <- [t0, ..., t0+(L_f-1)*delta]
+        IF any target time lies outside split_manifest:
+            CONTINUE
+        END IF
+        IF any input or target time is excluded by sample_policy.service_window:
+            CONTINUE
+        END IF
+        IF sample_policy forbids the resulting service-day crossing:
+            CONTINUE
+        END IF
+        sample_id <- stable ID of dataset, split, t0, L_h, L_f and window-policy version
+        APPEND {sample_id, forecast_origin=t0, input_times, target_times} to plan
+    END FOR
+    RETURN plan
+END PROCEDURE
+
+PROCEDURE generating_trip_generation_data_and_OD_dict
+    INPUT top_D_stations=R, base_dir, prefix, str_prdc_attr, seq_len=L_h, horizon=L_f.
+    INPUT everyday_start_time_str, everyday_end_time_str, interval duration and sample_policy.
+    INPUT frozen mapping, observation_store, prefix interval labels and permitted history stores.
+    INPUT auxiliary_required, generation_signal_bundle, history_required, optional sample_plan.
+    OUTPUT {sample_artifact, feature_artifact_or_absent, manifest, diagnostics}.
+    labels <- READ prefix_result_array
+    mapping <- LOAD frozen training-derived destination mapping
+    actual <- generate_T_N_D_ODs(labels.full_OD, R, mapping)
+    IF L_f is absent:
+        L_f <- sample_policy.explicit_legacy_horizon
+    END IF
+    CHECK L_h > 0 and L_f > 0
+    IF sample_plan is absent:
+        sample_plan <- build_sample_plan(labels.interval_grid, prefix split_manifest, sample_policy, L_h, L_f)
+    ELSE:
+        CHECK sample_plan dataset, split, lengths, interval and policy IDs match this request
+    END IF
+
+    feature_stores <- absent
+    IF auxiliary_required:
+        feature_stores <- LOAD production and attraction from generation_signal_bundle
+        NORMALIZE prdc/attr task aliases to production/attraction
+        IF a single-task compatibility adapter was explicitly selected:
+            LABEL its output PARTIAL_TASK_BUNDLE and use its separate artifact destination
+        END IF
+        INDEX each task's covariates by full timestamp and availability time
+    END IF
+    samples <- empty list
+    rejected <- empty list
+    diagnostics <- empty aggregate report
+
+    FOR EACH planned_sample in sample_plan:
+        t0 <- planned_sample.forecast_origin
+        sample_id <- planned_sample.sample_id
+        input_times <- planned_sample.input_times
+        target_times <- planned_sample.target_times
+        buffer <- {sample_id, forecast_origin=t0, xtime=input_times, ytime=target_times}
+        buffer.finished <- empty list
+        buffer.unfinished_raw <- empty list
+        buffer.y <- empty list
+        buffer.target_observation_mask <- empty list
+        sample_status <- ACCEPT
+        IF auxiliary_required:
+            buffer.historical_features <- empty task-keyed lists
+            buffer.future_features <- empty task-keyed lists
+        END IF
+        IF history_required:
+            buffer.history_day_raw <- empty list
+            buffer.history_week_raw <- empty list
+            buffer.history_month_raw <- empty list
+            buffer.reference_metadata <- empty list
+        END IF
+
+        FOR EACH tau in planned_sample.input_times:
+            observation <- build_cutoff_observations(tau, t0, observation_store)
+            IF observation is unavailable:
+                observation <- sample_policy.resolve_missing_input(tau, t0)
+            END IF
+            IF observation.status=REJECT:
+                sample_status <- REJECT
+                BREAK
+            END IF
+            finished <- generate_T_N_D_ODs(observation.finished_raw with a singleton time axis, R, mapping)[0]
+            APPEND finished to buffer.finished
+            APPEND observation.unfinished to buffer.unfinished_raw
+            IF auxiliary_required:
+                features <- SELECT each task's covariates at tau with available_at <= t0
+                APPLY sample_policy.missing_covariate_rule to unavailable features
+                APPEND features to buffer.historical_features by task
+            END IF
+        END FOR
+
+        IF sample_status=ACCEPT:
+            FOR EACH tau in planned_sample.target_times:
+                target <- GET actual[tau] or MISSING
+                completeness <- GET labels.completeness[tau] or UNKNOWN
+                IF target is missing or completeness is insufficient:
+                    resolution <- sample_policy.resolve_target(target, completeness)
+                    IF resolution.status=REJECT:
+                        sample_status <- REJECT
+                        BREAK
+                    END IF
+                    (target, mask) <- resolution.target_and_valid_compressed_slot_mask
+                    MASK every affected compressed origin row when an unresolved destination has no identifiable slot
+                ELSE:
+                    mask <- all true[N,R+1]
+                END IF
+                APPEND target to buffer.y
+                APPEND mask to buffer.target_observation_mask
+                IF auxiliary_required:
+                    features <- SELECT target-time covariates announced or forecastable by t0
+                    APPLY sample_policy.missing_covariate_rule to unavailable features
+                    APPEND features and their availability provenance to buffer.future_features by task
+                END IF
+            END FOR
+        END IF
+
+        IF history_required AND sample_status=ACCEPT:
+            FOR EACH source in {day, week, month}:
+                FOR EACH tau in planned_sample.input_times:
+                    reference_time <- MAP tau to the previous calendar day, seven days,
+                                        or same calendar date in the previous month for source
+                    reference_value <- UNAVAILABLE
+                    metadata <- {source, requested_time=reference_time, status=missing}
+                    IF reference_time exists:
+                        record <- SELECT history record at reference_time available by t0
+                        IF record has complete actual destinations:
+                            reference_value <- generate_T_N_D_ODs(record.OD with a singleton time axis, R, mapping)[0]
+                            metadata <- record timestamp, availability and observed status
+                        END IF
+                    END IF
+                    IF reference_value=UNAVAILABLE:
+                        resolution <- sample_policy.resolve_missing_history(source, reference_time, t0)
+                        IF resolution.status=REJECT:
+                            sample_status <- REJECT
+                            BREAK
+                        END IF
+                        reference_value <- resolution.value_or_missing_marker
+                        metadata <- resolution.provenance_and_status
+                    END IF
+                    APPEND reference_value to buffer["history_" + source + "_raw"]
+                    APPEND metadata to buffer.reference_metadata
+                END FOR
+                IF sample_status=REJECT:
+                    BREAK
+                END IF
+            END FOR
+        END IF
+
+        IF any required covariate rule rejected this buffer:
+            sample_status <- REJECT
+        END IF
+        IF sample_status=REJECT:
+            APPEND {sample_id=planned_sample.sample_id, reasons} to rejected
+            CONTINUE
+        END IF
+        CHECK all active streams have the planned lengths and timestamps
+        APPEND buffer to samples
+    END FOR
+
+    B <- length(samples)
+    payload.finished <- STACK samples.finished as [B,L_h,N,R+1]
+    payload.unfinished_raw <- STACK samples.unfinished_raw as [B,L_h,N,1]
+    payload.y <- STACK samples.y as [B,L_f,N,R+1]
+    payload.target_observation_mask <- STACK masks as [B,L_f,N,R+1]
+    payload.xtime, payload.ytime <- STACK planned input and target timestamps
+    payload.sample_id, payload.forecast_origin <- sample IDs and origins
+    payload.RDS_id <- mapping.RDS_id
+    manifest.aliases <- {sample_ids:sample_id, unfinished:unfinished_raw}
+    manifest.units <- passenger_count
+    manifest.optional_fields <- active fields for this component plan
+    IF history_required:
+        FOR EACH source in {day, week, month}:
+            payload["history_" + source + "_raw"] <- STACK references as [B,L_h,N,R+1]
+        END FOR
+        manifest.history <- {representation_kind=reference_od, scale=passenger_count}
+        manifest.reference_metadata <- per-sample source timestamps, availability and status
+        ADD only caller-declared history_day/week/month and history_short/history_long aliases
+    END IF
+    feature_artifact <- absent
+    IF auxiliary_required:
+        feature_payload <- {historical_features, future_features, task_schemas, sample_id, xtime, ytime}
+        IF both tasks share identical covariates:
+            STORE one immutable feature payload with two task references
+        END IF
+        ADD explicit features/additional_feature compatibility aliases
+        feature_artifact <- save_to_pickle(feature_payload, configured split feature destination)
+    END IF
+    payload.encoder_knowledge, payload.decoder_knowledge <- PENDING_JOIN_BY_SAMPLE_ID
+    sample_artifact <- save_to_pickle(payload and manifest, configured split sample destination)
+    FOR EACH numeric payload tensor:
+        print_array_info(tensor)
+    END FOR
+    diagnostics.rejected <- rejected
+    RETURN {sample_artifact, feature_artifact, manifest, diagnostics}
+END PROCEDURE
+
+PROCEDURE build_cutoff_observations(entry_interval, forecast_cutoff, observation_store)
+    INPUT entry interval, observation cutoff and event-timed store with cohort/coverage policy.
+    OUTPUT {status, finished_raw[N,N], unfinished[N,1], coverage, conservation_status}.
+    CHECK entry_interval ends by forecast_cutoff
+    coverage <- observation_store.entry_coverage(entry_interval, forecast_cutoff)
+    IF coverage is insufficient for the configured censored-input policy:
+        RETURN {status=REJECT, reason=incomplete_entry_coverage}
+    END IF
+    journeys <- SELECT eligible deduplicated entries in entry_interval observed by forecast_cutoff
+    finished_raw <- zeros[N,N]
+    unfinished <- zeros[N,1]
+    FOR EACH journey in journeys:
+        IF its exit occurred and was observed by forecast_cutoff:
+            finished_raw[journey.origin, journey.observed_destination] += journey.count
+        ELSE:
+            unfinished[journey.origin,0] += journey.count
+        END IF
+    END FOR
+    conservation_status <- CENSORED
+    IF complete offline labels and complete entries are available for this same eligible cohort:
+        CHECK row_sums(actual) = row_sums(finished_raw) + unfinished[:,0]
+        conservation_status <- VERIFIED
+    END IF
+    RETURN {status=ACCEPT, finished_raw, unfinished, coverage, conservation_status}
+END PROCEDURE
+
+PROCEDURE process_data_D
+    INPUT the legacy aggregation, split, task, and window arguments.
+    INPUT the same mapping and temporal contracts as the main generator.
+    OUTPUT a reduced OD sample artifact with explicit observability metadata.
+    READ prefix_result_array and actual labels.
+    LOAD the fixed RDS mapping.
+    COMPRESS labels without changing destination ranks.
+    BUILD the identical sample_manifest used by the full-data generator.
+    FOR EACH forecast origin in that manifest:
+        BUILD cutoff-visible finished inputs from event-timed records.
+        RETAIN actual future matrices as targets only.
+        RECORD input and target timestamp arrays.
+    END FOR
+    IF this reduced routine intentionally omits unfinished inputs:
+        LABEL the result as an ablation-input artifact.
+    END IF
+
+    SAVE to a distinct artifact name or an explicitly selected alternative.
+
+    RETURN reduced artifact and manifest.
+END PROCEDURE
+
+PROCEDURE Connect_to_SQL
+    INPUT prefix, train_sql, test_sql, val_sql.
+    INPUT station_manager_dict_file_path and externally supplied connection settings.
+    OUTPUT df, time_axis, station_to_codes, code_to_station.
+    READ the canonical station dictionary.
+    SELECT the configured read query matching prefix.
+    REJECT unknown prefix rather than selecting an unrelated default month.
+    REQUIRE an explicit column schema and declared date bounds.
+    OPEN a database connection without printing connection secrets.
+    TRY:
+        OPEN a cursor.
+        EXECUTE the authorized read query using bound date parameters.
+        FETCH rows and column metadata.
+        VERIFY actual returned columns match the declared schema.
+        REQUIRE entry time and origin code for observable entries.
+        REQUIRE exit time and destination code for resolved exits.
+        ACCEPT legacy entry-cohort final counts only for actual-label construction.
+        MATERIALIZE rows in a table with semantic names.
+    ON database error:
+        REPORT sanitized source and query-stage information.
+        RETURN failure without partial dataset artifacts.
+    FINALLY:
+        CLOSE cursor if opened.
+        CLOSE connection if opened.
+    END TRY
+    NORMALIZE station names using an explicit station-alias table.
+    COLLECT all entry codes seen for each canonical station name.
+    COLLECT all exit codes seen for each canonical station name.
+    UNION both sets; do not prefer the exit set and discard entry aliases.
+    MERGE the reviewed supplemental code table.
+    LEGACY SUPPLEMENTAL MAPPING FOR REVIEW:
+        新市桥 -> 521; 南门 -> 522; 南园北路 -> 523.
+        竹辉桥 -> 524; 荷花荡 -> 525; 黄天荡 -> 526.
+        金厍桥 -> 527; 星波街 -> 528; 李公堤南 -> 529.
+        金湖 -> 530; 华莲 -> 531; 斜塘 -> 532.
+        苏州奥体中心 -> 533; 方洲公园 -> 534; 星塘街 -> 535.
+        龙墩 -> 536; 东沙湖 -> 537; 葑亭大道 -> 538.
+        阳澄湖南 -> 539.
+        双桥 and 红庄 legacy zero entries mean unresolved, not valid AFC code zero.
+    REQUIRE this mapping to match the supplied data period before use.
+    REMOVE duplicate aliases per canonical station.
+    BUILD the inverse code_to_station map.
+    IF any code maps to multiple distinct canonical stations:
+        REPORT the conflict and require explicit reconciliation.
+    END IF
+    IF a network station has no observed code:
+        RETAIN its canonical row with a missing-mapping status.
+    END IF
+    PARSE timestamps in the declared timezone and precision.
+    CONSTRUCT the complete requested interval grid.
+    DISTINGUISH known empty intervals from absent extracts.
+    SORT the grid and verify uniqueness.
+    RETURN reconciled rows, grid, forward map, inverse map.
+END PROCEDURE

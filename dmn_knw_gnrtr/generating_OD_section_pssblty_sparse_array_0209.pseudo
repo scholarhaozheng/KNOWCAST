@@ -1,0 +1,176 @@
+MODULE generating_OD_section_pssblty_sparse_array_0209
+PURPOSE Produce time-indexed candidate attributes, exact binary incidence and optional CP storage.
+PAPER Eqs. (21)–(24); CP compression is an optional storage adapter.
+
+PROCEDURE batch_processing(Time_DepartFreDic, OD_path_dic, OD_feature_array_dic,
+                            Date_and_time_OD_path_cp_factors_dic, station_manager_dict;
+                            batch_size, output_paths, processing_function, device, processing_policy)
+    INPUT timestamp snapshots, candidate catalog, registry, existing output maps and execution policy.
+    OUTPUT {features, incidence_storage, failures}.
+    timestamps <- SORT requested snapshot keys
+    failures <- empty list
+    FOR EACH consecutive timestamp batch of size batch_size:
+        jobs <- empty list
+        FOR EACH timestamp in batch:
+            worker_device <- processing_policy.select_device(device, timestamp)
+            jobs += SUBMIT processing_function(Time_DepartFreDic[timestamp], OD_path_dic,
+                        station_manager_dict, worker_device,
+                        gpu_id only when an accelerator is selected; processing_policy)
+        END FOR
+        FOR EACH completed job:
+            IF job failed or job.result.status != COMPLETE:
+                APPEND {job.timestamp,job.error} to failures
+                CONTINUE
+            END IF
+            result <- job.result
+            CHECK result timestamp, station order and candidate IDs
+            OD_feature_array_dic[result.timestamp] <- result.attributes, masks, statuses and path IDs
+            Date_and_time_OD_path_cp_factors_dic[result.timestamp] <- result.exact_incidence and optional CP
+        END FOR
+        SAVE both output maps and their common completed/pending/failed timestamp manifest
+        REPORT batch progress and resource usage
+        IF processing_policy.stop_after_failure AND failures is nonempty:
+            BREAK
+        END IF
+    END FOR
+    RETURN {features=OD_feature_array_dic,incidence_storage=Date_and_time_OD_path_cp_factors_dic,failures}
+END PROCEDURE
+
+PROCEDURE processing_Time_DepartFreDic_item(Time_DepartFreDic_item, OD_path_dic,
+                                            station_manager_dict, device, gpu_id; processing_policy)
+    INPUT timestamped line-aware service snapshot, distinct candidate catalog and station registry.
+    OUTPUT {timestamp, attributes, path_ids, path_status, feasible_mask, exact_incidence, optional_CP, metadata}.
+    (timestamp,snapshot) <- Time_DepartFreDic_item
+    N <- station_manager_dict.station_count
+    P_max <- maximum candidate count when padded storage is selected
+    F_path <- width of processing_policy.path_feature_schema
+    attributes <- missing/padded records with logical shape [N,N,P_max,F_path]
+    path_ids <- candidate catalog IDs in stable OD/path order
+    path_status <- PADDED over the logical candidate axes
+    feasible_mask <- false over the same axes
+    exact_incidence <- empty sparse binary tensor with logical shape [N,N,P_max,N,N]
+    metadata <- timestamp, availability, station/topology/timetable IDs
+    IF snapshot is unavailable:
+        RETURN {timestamp,status=MISSING_SNAPSHOT,metadata}
+    END IF
+    CHECK raw service unit=trains_per_hour
+    FOR EACH real ordered OD pair (m,n) in OD_path_dic:
+        seen_signatures <- empty set
+        FOR EACH (p,path) in this OD's stable candidate order:
+            IF path.signature is in seen_signatures:
+                RAISE DuplicateCandidate(m,n,path.id)
+            END IF
+            ADD path.signature to seen_signatures
+            CHECK path connects m to n through its ordered route transitions
+            temporary_sections <- empty set
+            status <- FEASIBLE
+            FOR EACH transition (u,v,line) in path:
+                IF transition lacks physical support:
+                    status <- INFEASIBLE
+                    BREAK
+                END IF
+                service <- snapshot.sections[(u,v,line)]
+                IF service is absent or service.status=missing:
+                    status <- UNKNOWN
+                    BREAK
+                END IF
+                IF service.status=known_closed or service.frequency=0:
+                    status <- INFEASIBLE
+                    BREAK
+                END IF
+                CHECK service.frequency is finite and positive
+                ADD directed physical section (u,v) to temporary_sections
+            END FOR
+            path_status[m,n,p] <- status
+            IF status != FEASIBLE:
+                CONTINUE
+            END IF
+            feasible_mask[m,n,p] <- true
+            features <- station/hop and actual-line-change counts under the declared schema
+            FOR EACH additional feature phi:
+                features[phi] <- AGGREGATE complete path's section-level feature using Eq. (21) convention
+            END FOR
+            attributes[m,n,p,:] <- features
+            FOR EACH (u,v) in temporary_sections:
+                exact_incidence[m,n,p,u,v] <- 1
+            END FOR
+        END FOR
+        metadata.od_status[m,n] <- INCOMPLETE IF any candidate is UNKNOWN
+                                    ELSE EMPTY_SUPPORT IF no candidate is FEASIBLE
+                                    ELSE COMPLETE
+    END FOR
+    COALESCE incidence under binary set semantics
+    CHECK occupied entries belong to FEASIBLE candidates and structural sections
+    optional_CP <- absent
+    IF processing_policy.CP.enabled:
+        IF exact_incidence is empty:
+            optional_CP <- explicitly zero factors with configured rank and declared axis sizes
+        ELSE:
+            memory_needed <- ESTIMATE decomposition storage
+            IF memory_needed <= processing_policy.memory_budget:
+                optional_CP <- FACTORIZE exact_incidence using configured method, rank and seed
+                reconstructed <- RECONSTRUCT selected/full entries for diagnostics
+                optional_CP.diagnostics <- occupied/unoccupied error and off-network nonzero counts
+            ELSE IF processing_policy.CP.sparse_method is supplied:
+                optional_CP <- FACTORIZE using that sparse-capable method
+            ELSE:
+                metadata.CP_status <- SKIPPED_RESOURCE_LIMIT
+            END IF
+        END IF
+    END IF
+    IF optional_CP contains fitted factors:
+        reconstructed <- RECONSTRUCT the configured diagnostic entries
+        optional_CP.diagnostics <- occupied/unoccupied error and off-network nonzero counts
+    END IF
+    metadata.resource_usage <- host memory and selected accelerator memory when applicable
+    RETURN {timestamp,status=COMPLETE,attributes,path_ids,path_status,feasible_mask,exact_incidence,optional_CP,metadata}
+END PROCEDURE
+
+PROCEDURE generating_OD_section_pssblty_sparse_array_0209
+    INPUT base_dir, station_manager_dict_name and service/candidate/station artifact paths.
+    INPUT feature output, exact incidence output, optional CP output and processing_policy.
+    OUTPUT {artifact_receipts, completed_timestamps, failures}.
+    station_registry <- LOAD shared station manifest
+    candidates <- LOAD OD path catalog and enumeration metadata
+    snapshots <- LOAD timestamped service records and availability
+    feature_map <- LOAD compatible existing feature output OR empty mapping
+    incidence_map <- LOAD compatible existing exact-incidence/storage output OR empty mapping
+    completed <- timestamps with matching complete paired outputs and source fingerprints
+    remaining <- SORT requested snapshot timestamps excluding completed
+    failures <- empty list
+
+    IF processing_policy.mode=serial:
+        FOR EACH timestamp in remaining:
+            result <- processing_Time_DepartFreDic_item(
+                (timestamp,snapshots[timestamp]),candidates,station_registry,
+                processing_policy.device,processing_policy.gpu_id;processing_policy)
+            IF result.status != COMPLETE:
+                APPEND {timestamp,result.status} to failures
+                CONTINUE
+            END IF
+            MERGE result by timestamp into feature_map and incidence_map
+            SAVE paired checkpoint at configured cadence
+        END FOR
+    ELSE IF processing_policy.mode=parallel:
+        jobs <- SUBMIT each remaining timestamp to the configured bounded worker pool
+        FOR EACH completed job:
+            IF job failed or job.result.status != COMPLETE:
+                APPEND timestamp and error to failures
+            ELSE:
+                MERGE its structured result by timestamp into both maps
+            END IF
+        END FOR
+    ELSE IF processing_policy.mode=batch:
+        result <- batch_processing(snapshots restricted to remaining,candidates,feature_map,
+                    incidence_map,station_registry; configured batch/output/device parameters,
+                    processing_function=processing_Time_DepartFreDic_item,processing_policy)
+        feature_map,incidence_map,failures <- result.features,result.incidence_storage,result.failures
+    ELSE:
+        RAISE InvalidProcessingMode
+    END IF
+    CHECK candidate IDs, masks and exact-incidence axes match across paired records
+    completed <- successful paired timestamp set
+    manifest <- completed, failed and pending timestamps with source fingerprints
+    artifact_receipts <- WRITE both maps, optional CP products and manifest
+    RETURN {artifact_receipts,completed_timestamps=completed,failures}
+END PROCEDURE

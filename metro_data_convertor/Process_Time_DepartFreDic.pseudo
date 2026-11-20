@@ -1,0 +1,85 @@
+MODULE Process_Time_DepartFreDic
+PURPOSE Tensorize line-specific service records on the shared station and line axes.
+PAPER Section 4.5.1 K7 and Section 4.6 Eq. (26).
+
+PROCEDURE Process_Time_DepartFreDic(station_index_root, Time_DepartFreDic_file_path,
+                                    Time_DepartFreDic_Array_file_path;
+                                    line_manifest, source_schema, output_variant)
+    INPUT station manifest, timestamped sections, line manifest, source schema and output path.
+    INPUT output_variant: paper_tensor or a separately named legacy_station_projection.
+    OUTPUT {artifact, timestamps, shape, coverage_summary}.
+    station_data <- load_network_records(station_index_root, declared station schema, expected IDs, trust policy)
+    service_data <- load_network_records(Time_DepartFreDic_file_path, source_schema, expected IDs, trust policy)
+    station_lookup <- authoritative name-to-index map from station_data.root
+    line_lookup <- line_id-to-channel map from line_manifest
+    N <- number of stations
+    L <- number of lines
+    topology_mask[N,N,L] <- declared directed section membership
+    CHECK station indices are 0..N-1 and line channels are 0..L-1
+    timestamps <- SORT service_data.root timestamp keys
+    results <- MAP Process_Time_DepartFreDic.process_timestamp over timestamps
+                using sequential execution or the configured bounded worker pool
+    ORDER results by timestamps
+
+    IF output_variant=paper_tensor:
+        output <- timestamp-keyed records from results with:
+            raw_values=frequency_array[N,N,L], topology_support=metadata.topology_mask,
+            coverage_and_status=metadata.coverage, provenance=metadata.provenance,
+            units=trains_per_hour, station_order_id and line_order_id
+    ELSE IF output_variant=legacy_station_projection:
+        output <- APPLY source_schema.legacy_aggregation over destination/direction
+        LABEL output as a lossy [N,L] compatibility projection
+    ELSE:
+        RAISE UnknownOutputVariant(output_variant)
+    END IF
+    artifact <- WRITE output to Time_DepartFreDic_Array_file_path with axis IDs,
+                unit=trains_per_hour, coverage, source version and output_variant
+    RETURN {artifact, timestamps, shape=output.shape, coverage_summary}
+END PROCEDURE
+
+PROCEDURE Process_Time_DepartFreDic.process_timestamp(item)
+    INPUT item=(timestamp, record).
+    INPUT captured station_lookup, line_lookup, topology_mask, N, L and source_schema.
+    OUTPUT (timestamp, frequency_array[N,N,L], metadata).
+    frequency_array <- zeros[N,N,L]
+    coverage <- NOT topology_mask
+    provenance <- empty mapping
+    seen <- empty set
+    FOR EACH section in record.sections, ordered by directed section key:
+        (u,v,ell) <- shared indices for section source, destination and line
+        CHECK topology_mask[u,v,ell]=true
+        IF section.status=missing OR (section.frequency=UNCOMPUTED AND no headway is supplied):
+            coverage[u,v,ell] <- false
+            CONTINUE
+        ELSE IF section.status=known_closed:
+            frequency <- 0
+        ELSE IF section stores frequency:
+            frequency <- CONVERT section.frequency from declared units to trains_per_hour
+        ELSE IF section stores headway:
+            (seconds,status) <- parse_headway_seconds(section.headway, source_schema)
+            IF status=missing:
+                coverage[u,v,ell] <- false
+                CONTINUE
+            END IF
+            frequency <- 3600/seconds IF status=operating ELSE 0
+        ELSE:
+            RAISE UnknownServiceEncoding(section)
+        END IF
+        CHECK frequency is finite and nonnegative
+        IF (u,v,ell) is in seen:
+            frequency <- RESOLVE previous and current values using source_schema.duplicate_stream_rule
+        END IF
+        frequency_array[u,v,ell] <- frequency
+        coverage[u,v,ell] <- true
+        provenance[u,v,ell] <- section.source_provenance
+        ADD (u,v,ell) to seen
+    END FOR
+    IF record explicitly declares complete no-service coverage:
+        frequency_array[topology_mask] <- 0
+        coverage[topology_mask] <- true
+    END IF
+    missing_sections <- topology_mask AND NOT coverage
+    APPLY source_schema.completeness_policy to missing_sections
+    metadata <- {coverage, topology_mask, provenance, unit=trains_per_hour}
+    RETURN (timestamp, frequency_array, metadata)
+END PROCEDURE

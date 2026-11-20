@@ -1,0 +1,70 @@
+MODULE test_PYGT_0917
+PURPOSE Reload and evaluate the independent generation estimator.
+PAPER Section 4.3.2; these are auxiliary diagnostics, not Table 3 OD metrics.
+
+PROCEDURE test_PYGT
+    INPUT base_dir, prefix, str_prdc_attr, optional checkpoint_descriptor and evaluation_set.
+    OUTPUT auxiliary evaluation metrics, predictions, and provenance.
+    NORMALIZE prdc/attr to canonical production/attraction under the shared task-name map.
+    RESOLVE the selected task's held-out sequence artifact from its manifest.
+    RESOLVE the matching task-specific hyperparameters artifact.
+    RESOLVE str_prdc_attr_RecurrentGCN_model.
+    IF only a legacy generic test_dataset name exists:
+        REQUIRE a manifest proving its task, split, and schema.
+    END IF
+    sequences <- evaluation_set IF supplied ELSE LOAD the declared held-out sequence artifact.
+    checkpoint <- checkpoint_descriptor IF supplied ELSE LOAD the resolved task checkpoint.
+    REQUIRE an actual declared evaluation set; a no-validation training policy creates no implicit test set.
+    LOAD model architecture, feature normalization, station order, and target scaling.
+    VALIDATE graph, feature width, and task label definitions.
+    estimator <- RECONSTRUCT RecurrentGCN and its declared Seq2Seq wrapper.
+    LOAD trained parameter state onto an available device.
+    CHECK all expected parameter names and dimensions.
+    ENTER evaluation mode.
+    DISABLE optimizer updates and gradient recording for diagnostics.
+    INITIALIZE squared_error_sum <- 0.
+    INITIALIZE absolute_error_sum <- 0.
+    INITIALIZE target_count <- 0.
+    INITIALIZE relative_error_sum <- 0.
+    INITIALIZE nonzero_count <- 0.
+    INITIALIZE prediction records and invalid-example diagnostics.
+    FOR EACH held-out sequence:
+        RESET recurrent state at the sample boundary.
+        forecast <- forecast_sequence(estimator, held-out sample's complete auxiliary context).
+        predictions <- forecast.values; target_times <- forecast.target_times.
+        USE only inputs available at this sample's forecast origin.
+        ALIGN predictions and labels by target timestamp and station identifier.
+        CONVERT both to original flow units under the stored transform.
+        MATCH their shape explicitly before subtracting.
+        REJECT any accidental station-by-station cross-product broadcast.
+        FOR EACH valid paired target entry:
+            error <- predicted - actual.
+            squared_error_sum <- squared_error_sum + error squared.
+            absolute_error_sum <- absolute_error_sum + ABS(error).
+            INCREMENT target_count.
+            IF actual is nonzero:
+                relative_error_sum <- relative_error_sum + ABS(error) / ABS(actual).
+                INCREMENT nonzero_count.
+            END IF
+        END FOR
+        STORE sample_id, target times, predictions, and validity mask.
+    END FOR
+    IF target_count equals zero:
+        RETURN an empty-evaluation failure.
+    END IF
+    MSE <- squared_error_sum / target_count.
+    MAE <- absolute_error_sum / target_count.
+    IF nonzero_count > 0:
+        nonzero_MAPE_percent <- 100 * relative_error_sum / nonzero_count.
+    ELSE:
+        nonzero_MAPE_percent <- UNDEFINED.
+        REPORT that every valid target was zero.
+    END IF
+    REPORT MSE as MSE and nonzero-target MAPE as a percentage.
+
+    RECORD whether reductions are entry-weighted or use a separately declared alternative.
+    REPORT target count, nonzero count, and invalid-example count.
+    ATTACH model identity, task, held-out period, and feature schema.
+
+    RETURN metrics and evaluation records.
+END PROCEDURE

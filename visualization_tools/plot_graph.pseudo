@@ -1,0 +1,237 @@
+MODULE visualization_tools.plot_graph
+STATUS non-executable diagnostic plotting specification.
+PAPER_MAP: Section 5.2 convergence diagnostics; Sections 5.3 and 5.6; metric Equations (34)-(37).
+INPUT Numerical source data, checkpoint identity and metric definitions accompany each plot.
+GLOBAL INPUT CONTRACT:
+    Epoch history records carry actual epoch labels and formula-index metadata.
+    Batch history records carry epoch, batch, and global_optimizer_step separately.
+    Utility history distinguishes optimizer-step samples from end-of-epoch samples.
+    OD tensors use [sample,horizon,origin,compressed_destination_slot].
+    Compressed slots map through fixed RDS[origin,slot].
+    The last slot is the residual aggregate and is never mislabeled as one destination station.
+    Prediction bundles contain checkpoint_id, split, sample_ids, target_times, and masks.
+    Truth bundles contain the same ordered identifiers and target-time semantics.
+    Values are original passenger-flow counts unless a stored transform is explicitly supplied.
+    Metrics carry their definition, reduction order, and ratio-versus-percent unit.
+    The plotter cannot recover any of these contracts from array length alone.
+GLOBAL OUTPUT CONTRACT:
+    Figure artifact in the requested export format.
+    Sidecar metadata naming source artifacts, units, selections, and checkpoint identity.
+    Export receipt with destination and validation status.
+    File outputs belong to the supplied diagnostic directory, never a source workbook-as-directory.
+    No plot is labeled an independently reproduced paper result without separate evidence.
+
+PROCEDURE plot_step_points_from_excel
+    INPUT filepath, columns, step, output_pdf.
+    PARAMETERS sheet_name, index_column, index_kind, column_units, export_options.
+    OUTPUT utility-trajectory figure and source-index metadata.
+    READ the selected workbook sheet as a tabular data source.
+    REQUIRE every requested column exists.
+    REQUIRE index_column exists and is numeric or otherwise a declared ordered axis.
+    REQUIRE index_kind is epoch or global_optimizer_step.
+    IF the source is a per-batch utility table:
+        USE global_optimizer_step for its primary x coordinate.
+        KEEP epoch and batch as annotations or sidecar metadata.
+    ELSE IF the source contains one selected value per epoch:
+        USE its stored actual epoch numbers.
+        VERIFY only one value exists for each displayed epoch.
+    END IF
+    SORT rows by the declared x coordinate.
+    CHECK duplicate x values against the declared trajectory sampling convention.
+    PRESERVE gaps from missing measurements.
+    REQUIRE step is a positive marker-selection cadence.
+    DECLARE whether step counts observations or x-axis units.
+    SELECT marker positions accordingly, without altering the underlying trajectory.
+    RETAIN the first and final valid measurement when the export policy requests endpoints.
+    CREATE one labeled curve per requested utility coefficient.
+    LABEL the station coefficient with its station-count feature convention.
+    LABEL the transfer coefficient with its transfer-count feature convention.
+    IF coefficients have incomparable units:
+        USE separate aligned panels rather than an unexplained common scale.
+    END IF
+    ADD a legend identifying each coefficient and any initial prior reference.
+    LABEL x as the actual index_kind and y as the corresponding utility coefficient.
+    INCLUDE the run/checkpoint or trajectory identity in metadata.
+    RESOLVE output_pdf under the requested diagnostic directory.
+    IF filepath names an .xlsx file:
+        Resolve the PDF inside the supplied diagnostic output directory.
+    END IF
+    RENDER and export using the declared page size, font, and resolution settings.
+    VERIFY output exists, is nonempty, and has readable axes and legends.
+    RETURN figure receipt and plotted source rows.
+END PROCEDURE
+
+PROCEDURE plot_metric_pair
+    INPUT x_epochs, train_values, validation_values, metric_name, save_dir.
+    PARAMETERS separate_epoch_indices, metric_definition, units, masks, export_options.
+    OUTPUT paired training/validation metric figure.
+    REQUIRE explicit actual epoch coordinates for each series.
+    CHECK each series length against its own coordinate list.
+    ACCEPT a common x_epochs list only when both series truly share it.
+    PRESERVE unevaluated training or validation epochs as missing, not zeros.
+    VERIFY both series represent the same mathematical metric and reduction order.
+    IF train_values are the weighted optimization objective and validation_values are MAE:
+        REJECT a single generically labeled Loss comparison.
+        REQUIRE separate panels or separately named quantities.
+    END IF
+    IF metric metadata identifies WMAPE as a ratio:
+        MULTIPLY by 100 only for a percent-labeled display.
+        RECORD the conversion in the sidecar.
+    ELSE IF values are already percentages:
+        Use the supplied percentage values unchanged.
+    END IF
+    LABEL MAE and RMSE in passenger-flow units.
+    LABEL WMAPE or SMAPE with the appropriate percentage definition.
+    PLOT training and validation as distinct styles with a legible legend.
+    MARK selected-checkpoint epoch only when selection metadata supplies it.
+    Use the sealed selection_metadata when marking the selected epoch.
+    KEEP all evaluated epochs at their actual coordinates.
+    DISPLAY undefined metric values as gaps with an explained denominator status.
+    EXPORT under a sanitized metric-specific filename in save_dir.
+    WRITE source metric schema, units, reduction, and epoch lists beside the figure.
+    RETURN validated export receipt.
+END PROCEDURE
+
+PROCEDURE plot_training_curves
+    INPUT train_losses, val_mae_list, val_mape_list, val_rmse_list, save_dir.
+    PARAMETERS epoch_history, loss_kind, metric_metadata, selection_metadata, export_options.
+    OUTPUT convergence panels with distinct labeled quantities.
+    REQUIRE epoch coordinates for every supplied curve.
+    PREFER the structured epoch_history exported by the training procedure.
+    ADAPT legacy arrays only when their coordinate and unit metadata are supplied.
+    IDENTIFY whether train_losses means OD MAE, total objective, or generation penalty.
+    FOR the principal OD convergence panel:
+        USE original-scale training OD MAE.
+        USE validation MAE under the declared inference/evaluation protocol.
+        LABEL any training teacher-forcing versus validation autoregressive difference.
+    END FOR
+    PLACE validation RMSE in a separately labeled panel or explicitly compatible axis.
+    PLACE validation WMAPE in a percentage panel.
+    IF the legacy val_mape_list actually stores WMAPE:
+        USE the WMAPE label and its recorded ratio/percentage conversion.
+    END IF
+    IF total optimization objective is also requested:
+        CREATE a separate diagnostic panel.
+        SHOW its exact loss name and generation-weight schedule.
+    END IF
+    IF generation squared-error sum is requested:
+        LABEL its aggregation and squared-flow units separately.
+    END IF
+    KEEP training and validation legends consistent across panels.
+    MARK missing measurements without interpolating them into reported results.
+    SHOW early stopping or selected checkpoint only from saved run metadata.
+    LABEL post-hoc test curves separately if they are explicitly supplied.
+    SUPPORT the legacy no_pinn_loss directory name only as an OD-only-loss export alias.
+    EXPORT figures and a table of plotted values with their actual epoch indices.
+    VERIFY labels distinguish all metrics and scales.
+    RETURN export receipts and the plotted history subset.
+END PROCEDURE
+
+PROCEDURE plot_od_losses
+    INPUT epoch_od_errors_list, selected_pairs, save_path.
+    PARAMETERS evaluated_epochs, RDS, station_names, error_definition, selection_metadata.
+    OUTPUT per-OD error trajectories.
+    REQUIRE error tensors use [evaluated_epoch,N,K] or a declared horizon-resolved extension.
+    REQUIRE evaluated_epochs matches the number and ordering of error records.
+    VALIDATE each selected record contains origin, retained_slot, and real destination identity.
+    CHECK destination equals RDS[origin,retained_slot].
+    IF residual diagnostics are requested:
+        LABEL the slot as Other destinations / residual aggregate.
+    END IF
+    REQUIRE selected_pairs came directly from the scored valid-pair list.
+    IF only indices into a filtered candidate list are supplied:
+        REQUIRE that exact filtered list.
+    END IF
+    FOR EACH selected pair:
+        SELECT its matching tensor coordinate at every evaluated epoch.
+        PRESERVE missing values or zero-denominator errors explicitly.
+        IF errors are horizon-resolved:
+            PLOT separate horizons or apply the declared reported reduction.
+            RECORD which choice was made.
+        END IF
+        LABEL the curve with origin and actual destination station identifiers.
+    END FOR
+    LABEL x with actual evaluated epochs.
+    LABEL y with the supplied error metric and original-scale unit.
+    ATTACH the pair-selection rule and selection split to metadata.
+    IF pairs were selected by relative improvement:
+        PRESERVE signed improvement scores in the accompanying table.
+    ELSE IF selected by absolute change magnitude:
+        LABEL that quantity as change magnitude, not improvement.
+    END IF
+    STATE that selected OD illustrations are post-hoc examples, not all-OD averages.
+    EXPORT the figure and selected-pair identity table.
+    VERIFY no pair label or compressed index has changed during plotting.
+    RETURN export receipt.
+END PROCEDURE
+
+PROCEDURE plot_od_time_series
+    INPUT y_true_all, y_pred_all, selected_pairs, save_dir.
+    PARAMETERS prediction_manifest, truth_manifest, RDS, units, horizon_policy, export_options.
+    OUTPUT matched truth/prediction time-series panels for selected real OD pairs.
+    REQUIRE one declared selected-checkpoint prediction bundle.
+    REQUIRE prediction tensor shape [B,L_f,N,K].
+    REQUIRE truth tensor and observation masks use matching axes.
+    JOIN truth and predictions by sample_id rather than truncating both to the shorter length.
+    CHECK every joined sample's forecast origin and target timestamp array.
+    REJECT missing, duplicate, or mismatched samples unless an explicit subset is requested.
+    EXCLUDE padded batch rows using the genuine-sample validity mask.
+    VERIFY the prediction artifact comes from the selected checkpoint and correct split.
+    INVERT the stored OD transform exactly once if values are normalized.
+    CHECK original-scale status before applying any inverse transform.
+    RETAIN valid negative predictions as model outputs if the model allowed them.
+    Plot the prediction array under its recorded output policy.
+    VERIFY each selected pair's origin/slot/destination identity against RDS.
+    FOR EACH selected pair:
+        FOR EACH requested forecast horizon lambda:
+            EXTRACT truth and prediction at that exact horizon and pair coordinate.
+            EXTRACT the matching target timestamps and forecast origins.
+            SORT within the series by target timestamp, retaining forecast-origin provenance.
+            BREAK line segments across missing timestamps or missing observations.
+            PLOT observed and predicted demand as distinct labeled styles.
+            LABEL the horizon as lambda intervals and its duration in declared time units.
+        END FOR
+        DEFAULT representation uses separate horizon panels or distinguishable horizon curves.
+        IF multiple horizons predict the same target timestamp:
+            KEEP them distinct by (forecast_origin,horizon,target_time).
+        END IF
+        IF the caller requests one merged trajectory:
+            REQUIRE an explicit horizon-selection or combination rule.
+            APPLY the same stated rule consistently to every target timestamp.
+            LABEL the output as a derived diagnostic, not raw model forecasts.
+            VERIFY repeated truth values agree before deduplicating observations.
+        END IF
+        LABEL y as passengers per declared entry interval in the original flow scale.
+        LABEL x with timezone-aware target time and service date when needed.
+        LABEL the OD pair using canonical station names.
+        ADD truth/prediction and horizon legends.
+        EXPORT a pair-specific figure and the exact plotted row table.
+    END FOR
+    RECORD checkpoint ID, split, sample subset, horizon policy, and transformation ID.
+    RETURN all figure receipts and plotted-data references.
+END PROCEDURE
+
+PROCEDURE plot_od_time_series_first_step
+    INPUT y_true_all, y_pred_all, selected_pairs, save_dir.
+    PARAMETERS prediction_manifest, truth_manifest, RDS, units, export_options.
+    OUTPUT first-horizon OD time-series figures.
+    REQUIRE L_f is at least one.
+    VERIFY the first stored horizon corresponds to lambda=1 at target time t0.
+    SELECT horizon index zero in zero-based storage, retaining a length-one horizon axis.
+    SELECT the identical target timestamps, masks, and metadata slice.
+    CALL plot_od_time_series with an explicit first-horizon-only policy.
+    USE a distinct filename suffix so multi-horizon plots are not overwritten.
+    LABEL horizon as one interval, not one minute unless the interval actually is one minute.
+    IF repeated forecast origins occur:
+        APPLY the declared duplicate-sample policy before plotting.
+    END IF
+    RETAIN selected-checkpoint and original-scale checks from the shared procedure.
+    RETURN first-step export receipts.
+END PROCEDURE
+
+MODULE_FLOW:
+    The training exporter calls these procedures only after its numerical artifacts are sealed.
+    All requested formats, font choices, canvas sizes, and DPI values are caller-supplied decisions.
+    Export validation checks nonempty files, complete legends, unclipped labels, and correct units.
+    Plotting errors are reported as diagnostic-export failures rather than model-training successes.
+    This specification creates no figure files by itself and changes no project website content.

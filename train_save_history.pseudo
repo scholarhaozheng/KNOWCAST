@@ -1,0 +1,831 @@
+MODULE train_save_history
+EDITION paper-aligned reconstruction; NON-EXECUTABLE PSEUDOCODE
+PURPOSE main training, generation consistency, checkpoint selection, history and diagnostics
+PAPER Sections 3.2, 4.3, 5.1.3-5.1.4 and 5.2; Eqs. (15)-(19), (34)-(37)
+DEPENDENCIES lib/utils_CUROP.pseudo; models/Net_0207.pseudo;
+    train_evaluate_functions.pseudo; visualization_tools/plot_graph.pseudo
+
+TRAINING CONTRACT
+    N = stations; R = retained destinations per origin; K = R+1 including residual.
+    lh and lf are independent input and output sequence lengths.
+    Genuine batch size is read from each batch; it is not the configured nominal size.
+    N_train counts predicted OD matrices included in the declared full objective.
+    IF each of Q windows contributes lf targets, N_train = Q*lf under that convention.
+    Overlapping target times may appear more than once; record that multiplicity explicitly.
+    Use the stored forecast-target multiplicity and exclude padded rows.
+    Eq. (18) uses original-scale OD mean absolute error.
+    Eq. (16) uses SUM of squared production AND destination-attraction residuals.
+    Eq. (19) combines the two with the epoch-dependent Eq. (17) weight.
+    The paper does not fully specify minibatch scaling or epoch-index conventions.
+    REQUIRE declared choices and label them as reconstruction choices.
+    A frozen auxiliary model may produce detached targets; predicted-OD residuals retain gradients.
+    Main-model learned encoders and utility coefficients are registered optimizer parameters.
+    Validation selects checkpoints; test data is inaccessible during all selection decisions.
+    All exported diagnostics use restored selected-checkpoint predictions unless labeled otherwise.
+    Training-only transforms and mapping IDs are saved with every checkpoint.
+
+PROCEDURE read_cfg_file(filename,invocation=ABSENT)
+    INPUT filename; optional normalized training invocation.
+    PARAMETERS config schema and run-specific values stored in the configuration.
+    OUTPUT cfg with ComponentContext, validation report and provenance.
+    IF invocation is ABSENT:
+        invocation <- {entrypoint:main_training,mode:train,dry_specification_validation:false}.
+    END IF
+    cfg,provenance <- config.load_configuration(filename,invocation.get('project_root',ABSENT),invocation).
+    cfg.provenance <- provenance.
+    RETURN cfg.
+END PROCEDURE
+
+PROCEDURE init_weights(module,Using_GAT_or_RGCN)
+    INPUT module.
+    PARAMETERS Using_GAT_or_RGCN.
+    OUTPUT updated state of eligible newly constructed layers.
+    Apply only to newly initialized components designated by the architecture manifest.
+    Exclude pretrained encoders, pretrained auxiliaries and restored checkpoint parameters.
+    Exclude transport-informed utility coefficients from generic random reinitialization.
+    IF module owns an explicit reset_parameters contract:
+        Invoke that contract once with the selected initialization policy.
+    ELSE IF module is a dense Linear projection with a weight tensor:
+        Apply declared Xavier-uniform initialization and declared bias initialization.
+    ELSE:
+        Preserve constructor state and record that no generic override was applied.
+    Dispatch initialization through the module's registered parameter interface.
+    When binding a callback, bind Using_GAT_or_RGCN by keyword, leaving module unbound.
+END PROCEDURE
+
+PROCEDURE compute_epoch_od_errors(y_preds,y_truth,valid_mask=all_true)
+    INPUT y_preds, y_truth, valid_mask=all_true.
+    PARAMETERS None.
+    OUTPUT per-OD mean absolute errors [N,K] and valid counts.
+    REQUIRE identical shape [Q,lf,N,K] and matching sample/RDS identities.
+    REQUIRE original passenger-count scale and the declared evaluation output policy.
+    Broadcast a documented valid_mask to the full shape; zero targets stay valid.
+    Reject nonfinite values in valid cells.
+    absolute_error <- abs(y_preds-y_truth) where valid.
+    FOR origin o and compressed destination k:
+        numerator[o,k] <- sum over sample q and horizon h of valid absolute_error.
+        denominator[o,k] <- count of valid (q,h) observations.
+        mean_error[o,k] <- numerator/denominator if count>0, otherwise undefined.
+    END FOR
+    RETURN mean_error[N,K] and valid counts.
+    The second matrix axis is compressed destination column, not a global station ID.
+END PROCEDURE
+
+PROCEDURE main(args,validation_callback=None,allow_test_evaluation=true)
+    INPUT normalized training invocation args and optional validation_callback.
+    PARAMETERS allow_test_evaluation; values declared in cfg.train and cfg.model.
+    OUTPUT TrainingResult and its artifact manifest.
+    PHASE 1: Read configuration and resume identity.
+    REQUIRE args.mode is explicit under the entrypoint contract.
+    IF args.mode = evaluate:
+        RETURN evaluate_button.main(args).
+    END IF
+    REQUIRE args.mode = train.
+    cfg <- read_cfg_file(args.config_filename,invocation=args).
+    flags <- cfg.resolved_component_context with its normalized independent switches and compatibility aliases.
+    flags.generation_guidance is canonical; legacy trip_generation may alias it only without conflict.
+    is_search_trial <- cfg.train.run_kind='search_trial'.
+    REQUIRE a search trial has allow_test_evaluation=false and no posthoc test-curve request.
+    device <- selected device using the declared preference/fallback policy.
+    resume_state <- ABSENT.
+    IF args.resume_checkpoint is supplied:
+        resume_state <- READ_TRAINING_RESUME_BUNDLE(args.resume_checkpoint,device,cfg).
+    END IF
+    resume_run_id <- resume_state.manifest.run_id when present, otherwise ABSENT.
+    run_id <- resume_run_id when present, otherwise NEW_RUN_ID().
+    run_dir <- _get_log_dir(cfg,purpose='training',resume_run_id=resume_run_id).
+    run_manifest <- {run_id:run_id,status:RUNNING,configuration:cfg.provenance,output_dir:run_dir}.
+    Create all_epochs subdirectory only when checkpoint-retention policy requests it.
+    Save input config copy, resolved config, run ID and source-edition metadata.
+    logger <- utils.get_logger(run_dir,'train_save_history','info.log',cfg.log_level,write_to_file=true).
+    Apply recorded random-seed and determinism settings at this invocation boundary.
+    Record available runtime/library versions in a future executable implementation.
+    artifact_registry <- load and verify immutable station/RDS/residual-share/feature manifests.
+    RDS <- artifact_registry.RDS; residual_shares <- artifact_registry.residual_shares.
+    Bind verified artifact paths and IDs under cfg.artifacts for the Net_0207 constructor.
+    IF resume_state is present:
+        Verify immutable artifact IDs before loading any split or constructing any transform.
+    END IF
+    PHASE 2: Prepare training/validation data and fixed transforms.
+    graph <- BUILD_GRAPH_FOR_TRAINING(cfg,artifact_registry,device).
+    dataset <- PREPARE_TRAINING_DATASET(cfg,artifact_registry,resume_state).
+    Open only train and validation in this stage; test target files remain unopened.
+    scaler_od <- dataset.frozen_train_scaler.
+    scaler_tensor <- utils.StandardScaler_Torch(scaler_od.mean,scaler_od.raw_std,device,
+        transform_manifest=scaler_od.transform_manifest).
+    Verify scaler_tensor.axes, effective scale and transform_id equal the array scaler's values.
+    Check NumPy and tensor inverse transforms agree on a small deterministic sample.
+    cfg.artifacts.od_scaler <- scaler_tensor and bind its immutable manifest plus dataset.frequency_scaler.
+    Set cfg.initialization_mode to resume_training if resume_state is present,
+        otherwise fresh_main_training; use these same transform IDs in the model and every BatchBundle.
+    N <- cfg.model.num_nodes; K <- cfg.model.output_dim.
+    lh <- cfg.model.seq_len; lf <- cfg.model.horizon.
+    REQUIRE K = RDS.retained_count + 1 and dataset dimensions match.
+    PHASE 3: Construct the model, optimizer and sampler.
+    model <- Net_0207(cfg,logger) with all required pretrained artifacts supplied.
+    Initialize only newly created, non-pretrained trainable layers.
+    Set utility initialization to reported values when constructing a fresh full model.
+    Restore pretrained feature encoders before constructing optimizer parameter groups.
+    Move registered model, graphs and fixed tensor buffers to the selected device.
+    Validate all active trainable parameters are registered exactly once.
+    REQUIRE gravity zeta and mapping/scaler buffers are excluded from gradient updates.
+    Apply the declared independent-generation parameter policy.
+    optimizer_parameters <- copy cfg.train.optimizer_parameters.
+    Reject a conflicting optimizer_parameters learning rate rather than ignoring the sampled base_lr.
+    optimizer_parameters.learning_rate <- cfg.train.base_lr after that consistency check.
+    optimizer <- BUILD_OPTIMIZER(model,cfg.train.optimizer,optimizer_parameters).
+    scheduler <- BUILD_DECLARED_SCHEDULER(optimizer,cfg.train.schedule).
+    Build the optimizer/schedule selected by the run parameters.
+    REQUIRE batch size, maximum epochs, gradient policy and patience settings explicitly supplied.
+    The supplied DataLoader implements full-pass random reshuffling of unique samples.
+    REQUIRE cfg.train.sampler.kind='full_pass_uniform_permutation' for this supplied training path.
+    A weighted/subset/with-replacement sampler requires an external iterator adapter with explicit
+        draw/replica identities and inclusion weights; report REQUIRED_EXTERNAL_IMPLEMENTATION until supplied.
+    objective_context <- BUILD_OBJECTIVE_CONTEXT(dataset,cfg,flags).
+    sampler <- dataset.loaders['train']; sampler.random_state <- cfg.train.sampler.random_stream.
+    first_epoch <- cfg.train.start_epoch.
+    final_epoch <- cfg.train.start_epoch + cfg.train.epochs - 1.
+    Initialize epoch_history, batch_history, utility_step_history, utility_epoch_history.
+    Initialize per_epoch_od_errors with associated evaluated epoch/checkpoint identities.
+    best_validation_mae <- infinity, best_epoch <- absent, no_improvement <- 0.
+    best_checkpoint <- ABSENT and saved_epoch_checkpoints <- empty ordered map.
+    patience_reference_mae <- infinity separately from the strict checkpoint minimum.
+    global_optimizer_step <- 0.
+    IF resume_state is present:
+        Restore model, optimizer, scheduler, RNG and global-step states from resume_state.
+        Restore best metric, best checkpoint identity, completed history and next epoch.
+        Restore patience reference/count and sampler/teacher-forcing random-stream positions.
+        first_epoch <- resume_state.next_epoch.
+        Verify dataset.loaders['train'].canonical_order_hash equals the saved sampler manifest.
+        Bind its random_state to the restored sampler stream before any epoch shuffle.
+        REQUIRE this is a completed epoch-boundary checkpoint with no unrecorded gradient accumulation.
+        Reject changed scaler/RDS/architecture or an unexplained changed objective convention.
+    END IF
+    PHASE 4: Optimize epochs and select by validation MAE.
+    training_start <- MONOTONIC_TIME().
+    TRY:
+        FOR displayed_epoch FROM first_epoch TO final_epoch:
+            epoch_start <- monotonic clock.
+            IF flags.generation_guidance:
+                epsilon <- EPOCH_FORMULA_INDEX(displayed_epoch,cfg.train.epoch_origin).
+                generation_weight <- cfg.model.PINN_value * max(1-cfg.model.alpha_decay*epsilon,0).
+            ELSE:
+                epsilon <- NOT_APPLICABLE; generation_weight <- 0.
+            END IF
+            REQUIRE generation_weight finite and >= 0.
+            Set model to train mode, then enforce frozen auxiliary submodules in eval mode.
+            sampler.shuffle().
+            iterator <- sampler.get_iterator(order='current').
+            Initialize detached epoch sums/counts for OD, generation and total-objective diagnostics.
+            Initialize processed_sample_ids, processed_matrix_count and epoch batch counter.
+            Initialize gradient-accumulation state if the chosen estimator requires it.
+            FOR batch_index,batch in iterator:
+                bundle <- COLLATE_TRAINING_BATCH(batch,graph,device,lh,lf,N,K,dataset.component_context,flags).
+                actual_B <- length(bundle.sample_ids), after removal of padding from every aligned field.
+                REQUIRE actual_B > 0 and valid dimensions.
+                Validate exact [actual_B,lf,N,K] target and aligned future-knowledge shapes.
+                Check encoder/cutoff times and future decoder knowledge availability.
+                Keep three unfinished allocations separate from raw historical reference counts.
+                IF beginning an optimizer accumulation group, clear gradients.
+                forecast <- model.forward(bundle,mode=TRAIN_TEACHER_FORCING).
+                Teacher forcing may use previous target interval; current/future target never leaks early.
+                loss_result <- COMPUTE_TRAINING_LOSS(forecast,bundle,scaler_tensor,RDS,residual_shares,
+                    flags.generation_guidance,generation_weight,objective_context).
+                loss <- loss_result.total.
+                od_absolute <- loss_result.od_absolute.
+                generation_per_matrix <- loss_result.generation_per_matrix.
+                generation_status <- loss_result.generation_status.
+                od_term <- loss_result.od_term; generation_term <- loss_result.generation_term.
+                Backpropagate according to the declared accumulation policy recorded in objective_context.
+                Under full_objective_gradient_accumulation, the group is the entire epoch partition;
+                    do not step or zero gradients between its microbatches and do not divide by their count.
+                Under an unbiased stochastic policy, each batch is one update unless a separately
+                    declared averaging-of-estimators policy specifies exact group weights.
+                Before the first optimizer update with active generation guidance:
+                    Verify a controlled nonzero residual gives nonzero gradient to OD forecast parameters.
+                    Check the gradient at the OD forecast parameter itself.
+                END first-update check.
+                IF accumulation group is complete:
+                    Verify required active parameter gradients exist and are finite.
+                    Apply configured gradient clipping and log pre/post norm when selected.
+                    Perform optimizer update.
+                    Advance global_optimizer_step exactly once.
+                    Advance any per-update schedule according to declared timing.
+                END IF
+                Accumulate detached raw OD absolute-error sums and valid counts.
+                IF generation_status=MEASURED:
+                    Accumulate detached generation squared-residual sums and matrix counts.
+                ELSE:
+                    Record the generation diagnostic as SKIPPED for this batch.
+                END IF
+                Record optimization estimator values separately from count-weighted reporting values.
+                Record batch_index, displayed_epoch, epsilon, actual_B and optimizer step.
+                Record current utility coefficients with actual step identity when that layer is active.
+                Mark inactive/frozen utility branches explicitly, rather than accessing absent weights.
+                Append sample IDs and update processed matrix count excluding padding.
+                Release transient forward tensors after backward; do not retain computation graphs in logs.
+            END FOR
+            IF a final accumulation group has pending gradients:
+                Apply only the recorded estimator weights; never invent a nominal-size divisor.
+                Validate gradients, apply the same clipping rule and perform one optimizer update.
+                Increment global_optimizer_step and advance the per-update scheduler once.
+                Clear pending-gradient state before allowing a resumable epoch checkpoint.
+            END IF
+            Verify processed sample membership and multiplicities against the declared sampler.
+            For a full-pass epoch require each genuine sample exactly once; for weighted subset sampling
+                verify the realized draws/selection probabilities without falsely requiring full coverage.
+            REQUIRE at least one genuine batch and optimizer update unless an explicit dry run was requested.
+            reported_training_od_mae <- total raw absolute error / total valid-cell count.
+            reported_generation_sum <- measured generation squared residuals under declared target multiplicity,
+                or SKIPPED with a reason when no residual diagnostic was computed.
+            Label this a realized-sample sum when the sampler did not cover the full target set.
+            IF exporting a full-set estimate, separately apply and label the declared inclusion weights.
+            Record that training losses are measured across changing within-epoch parameters.
+            Compute epoch MAE from total absolute error divided by total valid-cell count.
+            Append epoch-end utility coefficients with one record per completed epoch.
+            IF displayed_epoch meets declared train-evaluation cadence:
+                train_result <- EVALUATE_TRAINING_SPLIT(model,dataset,'train',graph,device,cfg,flags,
+                    logger,displayed_epoch,global_optimizer_step,ABSENT).
+            ELSE:
+                train_result <- absent; keep missing metrics blank, not zero.
+            END IF
+            val_result <- EVALUATE_TRAINING_SPLIT(model,dataset,'val',graph,device,cfg,flags,
+                logger,displayed_epoch,global_optimizer_step,ABSENT).
+            REQUIRE finite val_result.MAE_od and complete validation sample coverage.
+            IF cfg.diagnostics.per_od_history AND not a lightweight search trial:
+                errors,counts <- compute_epoch_od_errors(val_result.y_evaluated,
+                    val_result.y_truth,val_result.valid_mask).
+                Append errors/counts with displayed_epoch and val_result's live-state identifier.
+            END IF
+            improved <- COMPARE_VALIDATION(val_result.MAE_od,best_validation_mae,cfg.train.tie_policy).
+            IF improved:
+                best_validation_mae <- val_result.MAE_od.
+                best_epoch <- displayed_epoch.
+                Mark current model state for best-checkpoint publication at this epoch boundary.
+            END IF
+            IF val_result.MAE_od < patience_reference_mae-cfg.train.min_delta:
+                patience_reference_mae <- val_result.MAE_od; no_improvement <- 0.
+            ELSE:
+                no_improvement <- no_improvement+1.
+            END IF
+            A smaller MAE always updates the best checkpoint even if its gain is below min_delta.
+            min_delta affects patience only; it must not silently choose a worse final checkpoint.
+            Append epoch record with OD/generation/objective diagnostics and train/val metrics.
+            Keep test columns absent during fitting/selection.
+            Record learning rates, elapsed time, weight w(epsilon) and checkpoint updates.
+            Advance any end-of-epoch scheduler exactly once, including an epoch that will stop or prune.
+            run_state.run_id <- run_id.
+            run_state.next_epoch <- displayed_epoch+1; store the already-advanced scheduler state.
+            Set run_state.completed_epoch, epsilon, global_step, best metric/epoch, patience state,
+                estimator metadata, RNG streams, artifact references and complete history position.
+            run_state.is_selected_best <- improved.
+            run_state.best_checkpoint_reference <- 'this_state' if improved,
+                otherwise the existing verified best_checkpoint ID/path; never embed a self-referential content hash.
+            saved_state <- SAVE_CHECKPOINT_BUNDLE(model,optimizer,scheduler,run_state,run_dir/'last').
+            Publish the last pointer to saved_state without replacing immutable payloads in place.
+            IF improved: best_checkpoint <- saved_state; atomically publish its best pointer.
+            IF per-epoch retention is enabled:
+                saved_epoch_checkpoints[displayed_epoch] <- saved_state.
+                Retain this same immutable state under the epoch identity.
+            END IF
+            Save matching best validation predictions when improved, or regenerate after restore.
+            Persist histories incrementally so pruning/failure does not erase prior progress.
+            IF validation_callback exists:
+                validation_callback(displayed_epoch,val_result.MAE_od,saved_state.manifest).
+                Permit pruning only after artifacts and state needed for audit are written.
+            END IF
+            early_stop <- declared patience rule using validation only.
+            IF early_stop: record reason and stop epoch loop.
+        END FOR
+        PHASE 5: Restore the selected checkpoint and export.
+        REQUIRE a finite best_validation_mae and an existing selected checkpoint.
+        selected_checkpoint <- READ_TRAINING_RESUME_BUNDLE(best_checkpoint.path,device,cfg).
+        selected_checkpoint_id <- best_checkpoint.id.
+        Restore the selected checkpoint strictly, including fine-tuned encoder and utility weights.
+        Verify restored checkpoint hash equals the selected record.
+        selected_val <- EVALUATE_TRAINING_SPLIT(model,dataset,'val',graph,device,cfg,flags,
+            logger,best_epoch,selected_checkpoint.global_step,selected_checkpoint.manifest).
+        Check selected validation score matches stored selection score within declared tolerance.
+        Use selected_val arrays for final OD diagnostics and exports.
+        IF allow_test_evaluation AND not a search trial:
+            Seal selection decisions and configuration before opening test targets.
+            test_context <- a copy of dataset.component_context.
+            test_context.checkpoint_manifest <- selected_checkpoint.manifest.
+            test_context.checkpoint_transform_id <- scaler_od.transform_id.
+            test_dataset <- utils.load_dataset(dataset_dir=cfg.data.dataset_dir,
+                batch_size=cfg.data.batch_size,test_batch_size=cfg.data.test_batch_size,
+                scaler_axis=scaler_od.axes,options=cfg.data with training_mode=false,
+                fit_scaler=false,scaler=scaler_od,frequency_scaler=dataset.frequency_scaler,
+                phases=['test'],component_context=test_context).
+            selected_test <- EVALUATE_TRAINING_SPLIT(model,test_dataset,'test',graph,device,cfg,flags,
+                logger,best_epoch,selected_checkpoint.global_step,selected_checkpoint.manifest).
+            Persist test predictions, truth, mask, sample identities and per-horizon metrics.
+        ELSE:
+            selected_test <- absent; do not substitute validation metrics under test labels.
+        END IF
+        IF posthoc_test_curves requested:
+            REQUIRE allow_test_evaluation=true and this run is not a search trial.
+            REQUIRE training and all selection decisions already complete and immutable.
+            POSTHOC_TEST_CURVES(saved_epoch_checkpoints,selected_checkpoint,model,test_dataset,
+                graph,device,cfg,flags,logger).
+            Restore selected checkpoint again after analyzing other saved epochs.
+        END IF
+        EXPORT_HISTORY_AND_DIAGNOSTICS(epoch_history,batch_history,
+            utility_step_history,utility_epoch_history,
+            per_epoch_od_errors,selected_val,cfg,run_dir).
+        Write best_epoch.txt and selected checkpoint ID, preserving original output compatibility.
+        run_manifest.status <- COMPLETE.
+        Attach the selected checkpoint ID and exported artifact hashes to run_manifest.
+        WRITE_MANIFEST(run_dir,run_manifest).
+    ON search pruning:
+        Persist PRUNED status, histories and best-so-far artifacts.
+        Re-raise the search framework's pruning signal to the caller.
+    ON failure:
+        Persist FAILED status, failing stage and last complete checkpoint identity.
+        Preserve partial history without calling the run successful.
+        Re-raise the error with useful sample/config/artifact context.
+    FINALLY:
+        Flush log writers, close figures/files and release owned temporary resources.
+        Record total elapsed time using a monotonic clock.
+    result <- TrainingResult(best_validation_mae,best_epoch,best_checkpoint,
+        selected_validation=selected_val,selected_test=selected_test,run_dir=run_dir,manifest=run_manifest).
+    RETURN result.
+    A source-compatible numeric adapter returns only best_validation_mae when requested.
+END PROCEDURE
+
+PROCEDURE READ_TRAINING_RESUME_BUNDLE(path,device,cfg)
+    INPUT path.
+    PARAMETERS device, cfg.
+    OUTPUT ResumeBundle with model/training state and artifact references.
+    Read the external manifest and verify schema, model family and checkpoint payload hash.
+    REQUIRE a trusted local or safe data-only format and explicit device mapping.
+    REQUIRE a complete epoch-boundary bundle, not a bare legacy weight dictionary.
+    Load model, optimizer, scheduler and RNG states without modifying a live model yet.
+    Load completed_epoch,next_epoch,global_step,best checkpoint identity and patience state.
+    Resolve a stored 'this state is best' marker to this verified bundle's own ID/path.
+    Verify a separately referenced best checkpoint still exists, matches its hash and belongs to the same run.
+    REQUIRE next_epoch=completed_epoch+1 and no pending unsaved accumulated gradients.
+    Verify resolved architecture, objective estimator and target-multiplicity signatures.
+    Verify stored scheduler.step_timing and last_step agree with the completed boundary.
+    Read the referenced OD scaler with mean,raw_std,effective_scale,axes,zero-variance policy and transform_id.
+    Read the frequency scaler when active, including raw trains/hour units and line/section axes.
+    Verify scaler, RDS, residual-share, graph and pretrained-artifact content hashes.
+    Verify every fitted artifact's training split; reject validation/test-fitted artifacts.
+    Load history through its stored boundary and identify any incomplete later records separately.
+    RETURN a ResumeBundle with all states and immutable artifact references.
+END PROCEDURE
+
+PROCEDURE PREPARE_TRAINING_DATASET(cfg,artifact_registry,resume_state)
+    INPUT artifact_registry, resume_state.
+    PARAMETERS cfg.
+    OUTPUT training/validation DatasetBundle and persisted transform identities.
+    component_context <- merge cfg.resolved_component_context with the verified immutable artifact registry.
+    Reject conflicting IDs or flags instead of overwriting either source silently.
+    Attach cfg's normalized component switches, generation_covariates profile and external-input dependencies.
+    Bind component_context's training sampler stream from cfg.train.sampler; evaluation uses no shuffle stream.
+    IF resume_state is absent:
+        fit_scaler <- true; scaler <- ABSENT; frequency_scaler <- ABSENT.
+        REQUIRE training normalization source, axes and zero-variance policy in cfg.data.
+        scaler_axis <- cfg.data.scaler_axis.
+    ELSE:
+        fit_scaler <- false.
+        scaler <- utils.StandardScaler(resume_state.od_scaler.mean,resume_state.od_scaler.raw_std,
+            transform_manifest=resume_state.od_scaler.transform_manifest).
+        Verify saved axes, effective scale,transform_id,fit metadata and zero-variance policy exactly.
+        frequency_scaler <- the verified saved frequency transform, or ABSENT if disabled.
+        scaler_axis <- scaler.axes.
+        component_context.checkpoint_transform_id <- scaler.transform_id.
+        component_context.checkpoint_manifest <- resume_state.manifest.
+    END IF
+    dataset <- utils.load_dataset(dataset_dir=cfg.data.dataset_dir,
+        batch_size=cfg.data.batch_size,test_batch_size=cfg.data.test_batch_size,
+        scaler_axis=scaler_axis,options=cfg.data with training_mode=true,
+        fit_scaler=fit_scaler,scaler=scaler,frequency_scaler=frequency_scaler,
+        phases=['train','val'],component_context=component_context).
+    REQUIRE dataset.expected_counts['train']>0 and dataset.expected_counts['val']>0.
+    Verify training and validation target date membership and forecast-cutoff availability.
+    Keep April excluded under the reported March/May protocol unless a separate experiment says otherwise.
+    Preserve raw reference history on disk and use the loader's already normalized allocation streams.
+    Persist newly fitted scaler artifacts and their hashes before constructing checkpoints.
+    RETURN the named DatasetBundle; mapping aliases do not replace its documented fields.
+END PROCEDURE
+
+PROCEDURE COLLATE_TRAINING_BATCH(batch,graph,device,lh,lf,N,K,component_context,flags)
+    INPUT batch, graph, lh, lf, N, K, flags.
+    PARAMETERS device, component_context.
+    OUTPUT BatchBundle containing genuine training samples only.
+    REQUIRE batch.valid_mask is a boolean sample-padding mask with one entry per stored row.
+    genuine_indices <- positions where batch.valid_mask is true.
+    Reject an empty genuine_indices list; never infer padding from all-zero demand.
+    FOR every field declared sample-indexed in BatchRecord's schema:
+        Select genuine_indices along its declared sample axis, including all times, IDs,
+            dense/normalized/count histories, observation masks, availability and ragged path lists.
+        For a ragged list select its outer sample entries without flattening or densifying paths.
+    END FOR
+    Preserve shared immutable graph/manifests and representation tags without indexing them.
+    Let batch denote this consistently filtered record; all remaining valid_mask entries are true.
+    bundle <- utils.COLLATE_BATCH_RECORD(batch,N,graph.edge_index,graph.edge_attr,device,
+        lh,lf,component_context,return_y=true).
+    REQUIRE bundle.target_od.shape=[length(genuine_indices),lf,N,K].
+    REQUIRE encoder_steps length lh, decoder_steps length lf and target_observation_mask exact target shape.
+    REQUIRE all parallel future knowledge and generation feature times match bundle.ytime.
+    RETURN bundle with labels accessible only through the training teacher-forcing contract.
+END PROCEDURE
+
+PROCEDURE EVALUATE_TRAINING_SPLIT(model,dataset,split,graph,device,cfg,flags,
+    logger,displayed_epoch,global_step,saved_manifest)
+    INPUT model, dataset, split, graph, flags, logger, displayed_epoch, global_step, saved_manifest.
+    PARAMETERS device, cfg.
+    OUTPUT EvaluationResult tagged with its live or saved model identity.
+    Preserve dataset.component_context.get('checkpoint_manifest',ABSENT) for exact restoration.
+    Model per-module modes are preserved by run_model, including mixed frozen/trainable states.
+    IF saved_manifest is present:
+        state_manifest <- saved_manifest; verify current model tensor digest matches its model-state digest.
+    ELSE:
+        REQUIRE split is train or val; a search/current-epoch state cannot open test here.
+        state_manifest <- an in-memory provenance record with artifact_role='live_training_state'.
+        Record current model tensor digest, epoch,global_step,architecture and fixed-artifact IDs.
+        Include station_order_id,RDS_id,residual_shares_id,transform_id and graph IDs.
+        Assign a live-state identifier and mark persisted_checkpoint=false.
+    END IF
+    Temporarily set dataset.component_context.checkpoint_manifest <- state_manifest.
+    TRY:
+        result <- train_evaluate_functions.evaluate(model=model,dataset=dataset,dataset_type=split,
+            num_nodes=cfg.model.num_nodes,edge_index=graph.edge_index,edge_attr=graph.edge_attr,device=device,
+            seq_Len=cfg.model.seq_len,horizon=cfg.model.horizon,output_dim=cfg.model.output_dim,
+            four_step_method_included=flags.four_step_method_included,
+            history_distribution_included=flags.history_distribution_included,
+            traffic_assignment_included=flags.traffic_assignment_included,
+            depart_freq_included=flags.depart_freq_included,logger=logger,cfg=cfg,return_predictions=true).
+        REQUIRE result.sample_count=dataset.expected_counts[split].
+        RETURN result retaining the evaluated state identifier, even after context restoration.
+    FINALLY:
+        Restore the prior context manifest, deleting its temporary key if the saved state was ABSENT.
+        Keep the per-module flags restored by run_model.
+    END TRY
+END PROCEDURE
+
+PROCEDURE BUILD_OBJECTIVE_CONTEXT(dataset,cfg,flags)
+    INPUT training DatasetBundle, cfg and independent component flags.
+    PARAMETERS cfg.train.minibatch_estimator, target multiplicity and sampling policy.
+    OUTPUT context with full_objective_index, N_train, estimator policy and auxiliary policy.
+    full_objective_index <- [].
+    target_times_by_sample <- empty mapping.
+    FOR sample_id IN dataset.split_sample_order['train']:
+        target_record <- dataset.targets_by_id['train'][sample_id].
+        timestamps <- target_record.ytime[0:cfg.model.horizon].
+        Match their first timestamp and spacing to the persisted target-window manifest.
+        target_times_by_sample[sample_id] <- timestamps.
+        FOR target_time IN timestamps:
+            full_objective_index.APPEND((sample_id,target_time,replicate_index=0)).
+        END FOR
+    END FOR
+    context <- {full_objective_index:full_objective_index,N_train:LENGTH(full_objective_index),
+        target_times_by_sample:target_times_by_sample,
+        estimator_policy:cfg.train.minibatch_estimator,multiplicity:cfg.train.target_multiplicity,
+        observation_policy:cfg.train.observation_policy,sampler_kind:cfg.train.sampler.kind}.
+    IF context.sampler_kind='full_pass_uniform_permutation':
+        context.selection_probabilities <- uniform sample inclusion under each recorded batch draw.
+    ELSE:
+        context.selection_probabilities <- the supplied sampler adapter's matrix-inclusion record.
+    END IF
+    IF flags.generation_guidance:
+        context.auxiliary_policy <- cfg.generation.parameter_policy.
+    ELSE:
+        context.auxiliary_policy <- INACTIVE.
+    END IF
+    RETURN context.
+END PROCEDURE
+
+PROCEDURE COMPUTE_TRAINING_LOSS(forecast,bundle,scaler,RDS,residual_shares,
+                                generation_enabled,generation_weight,context)
+    INPUT ForecastBundle, training BatchBundle and original-scale OD transform.
+    PARAMETERS fixed RDS/residual shares, generation weight and declared objective context.
+    OUTPUT differentiable total, od_term, generation_term and detached-reporting source arrays.
+    B,L_f,N,K <- SHAPE(forecast.od_normalized).
+    y_hat <- scaler.inverse_transform(forecast.od_normalized).
+    y_true <- scaler.inverse_transform(bundle.target_od).
+    od_absolute <- ABS(y_hat-y_true).
+    generation_per_matrix <- ZEROS(shape=[B,L_f],device=y_hat.device).
+    generation_status <- SKIPPED.
+    IF generation_enabled AND generation_weight>0:
+        generation <- forecast.generation_targets.
+        Match its production/attraction [B,L_f,N] estimates to bundle.ytime and original flow units.
+        IF context.auxiliary_policy=frozen:
+            generation <- DETACH_TARGETS(generation).
+        ELSE:
+            Keep generation attached to its declared registered parameter group.
+        END IF
+        production_pred <- SUM(y_hat,axis=compressed_destination).
+        attraction_pred <- DESTINATION_TOTALS(y_hat,RDS,residual_shares).
+        generation_per_matrix <- SUM((generation.production-production_pred)^2,axis=station)
+            + SUM((generation.attraction-attraction_pred)^2,axis=station).
+        generation_status <- MEASURED.
+    END IF
+    od_term,generation_term,scaling <- DECLARED_MINIBATCH_ESTIMATOR(od_absolute,generation_per_matrix,
+        bundle.sample_ids,bundle.valid_mask,bundle.target_observation_mask,context).
+    total <- od_term + generation_weight*generation_term.
+    IF total is nonfinite: RETURN NUMERICAL_ERROR(bundle.sample_ids,scaling).
+    RETURN {total:total,od_term:od_term,generation_term:generation_term,od_absolute:od_absolute,
+        generation_per_matrix:generation_per_matrix,generation_status:generation_status,scaling:scaling}.
+END PROCEDURE
+
+PROCEDURE DESTINATION_TOTALS(compressed_prediction,RDS,residual_shares)
+    INPUT compressed_prediction, RDS, residual_shares.
+    PARAMETERS None.
+    OUTPUT physical-destination attractions [B,L_f,N].
+    Input shape [B,lf,N,K] is original-scale and remains differentiable.
+    REQUIRE RDS[o,k] maps each retained k in [0,R) to a unique real destination.
+    REQUIRE residual_shares[o,d]=0 for retained destinations.
+    REQUIRE nonretained shares are nonnegative and sum to one for every origin.
+    Initialize attraction[B,lf,N] <- zeros on the prediction's device/dtype.
+    FOR origin o from 0 through N-1:
+        FOR retained column k from 0 through R-1:
+            d <- RDS[o,k].
+            attraction[:,:,d] += compressed_prediction[:,:,o,k].
+        END FOR
+        residual <- compressed_prediction[:,:,o,R].
+        FOR nonretained destination d:
+            attraction[:,:,d] += residual * residual_shares[o,d].
+        END FOR
+    END FOR
+    Implement scatter/add as differentiable tensor operations, not CPU NumPy conversion.
+    Verify sum_d attraction = sum_o,k compressed_prediction within numerical tolerance.
+    RETURN attraction.
+    Summing compressed axis -2 gives K mixed destination columns, not N physical arrivals.
+END PROCEDURE
+
+PROCEDURE DECLARED_MINIBATCH_ESTIMATOR(od_absolute,generation_per_matrix,
+    sample_ids,valid_mask,target_observation_mask,context)
+    INPUT od_absolute, generation_per_matrix, sample_ids, valid_mask, target_observation_mask.
+    PARAMETERS context.
+    OUTPUT differentiable OD term, generation term and scaling metadata.
+    B,lf,N,K <- SHAPE(od_absolute); M <- context.N_train; m <- B*lf.
+    J <- context.full_objective_index.
+    matrix_ids <- [(sample_ids[b],context.target_times_by_sample[sample_ids[b]][h],0)
+        FOR b IN 0..B-1 FOR h IN 0..lf-1].
+    Each matrix identity is (sample_id,horizon timestamp,declared replicate index), not sample_id alone.
+    REQUIRE od_absolute shape [B,lf,N,K], generation_per_matrix shape [B,lf], and matching masks.
+    REQUIRE all sample-padding masks are true after collation; any replica has an explicit sampling weight.
+    Match those matrix identities to context.full_objective_index and inclusion probabilities.
+    For the reported complete-observation objective require every target_observation_mask cell true.
+    IF cells are missing, require a separate explicitly specified objective and denominator;
+        such a variant must not be silently labeled an exact implementation of Eq. (18).
+    For complete matrices, E_j <- sum over N*K OD absolute errors in target matrix j.
+    G_j <- generation_per_matrix at j's (batch row,horizon) position, already computed as
+        the sum over N production residual squares plus N attraction residual squares.
+    Full Eq. (18): L_OD = sum_j E_j/(M*N*K).
+    Full Eq. (16): L_g = sum_j G_j.
+    SWITCH context.estimator_policy:
+    CASE uniform_matrix_batch_unbiased:
+        REQUIRE each matrix has equal selection probability or equivalent uniform-window sampling.
+        Let m be genuine matrices in this batch, excluding padded rows; for fixed lf, m=B*lf.
+        od_term <- sum_batch E_j/(m*N*K).
+        generation_term <- (M/m)*sum_batch G_j.
+        Their expectations equal the two full objectives under the stated sampling conditions.
+        This expectation is a fixed-parameter sampling identity. Random reshuffling with parameter updates
+            is not claimed to give a conditionally unbiased full gradient after earlier draws in the epoch.
+    CASE full_objective_gradient_accumulation:
+        Partition the full target set into microbatches without changing parameter values.
+        od_term <- sum_microbatch E_j/(M*N*K).
+        generation_term <- sum_microbatch G_j.
+        Accumulate gradients over the entire partition; perform one optimizer step afterward.
+        Accumulate the unscaled full-objective generation gradients.
+        Hold stochastic-realization policy fixed when comparing with a full-batch reference.
+    CASE inclusion_probability_weighted:
+        REQUIRE known nonzero inclusion probability pi_j for each selected matrix.
+        od_term <- sum_selected(E_j/pi_j)/(M*N*K).
+        generation_term <- sum_selected(G_j/pi_j).
+        Validate the sampling design and whether probabilities are per draw or set inclusion.
+        Use set-inclusion weights for Horvitz-Thompson estimation; use draw weights for draw-based sampling.
+    CASE legacy_batch_sum_plus_mean:
+        od_term <- mean of this batch's valid absolute errors.
+        generation_term <- sum of this batch's squared station residuals.
+        Label this an explicitly different objective scaling requiring a weight reinterpretation.
+    OTHERWISE:
+        Reject missing/unknown estimator; do not use an opaque unrecoverable default.
+    END SWITCH
+    Apply no masked-cell denominator substitution unless that separate objective was selected.
+    scaling <- {policy:context.estimator_policy,N_train:M,batch_matrices:m,stations:N,destinations:K}.
+    RETURN od_term,generation_term,scaling.
+END PROCEDURE
+
+PROCEDURE EPOCH_FORMULA_INDEX(displayed_epoch,epoch_origin)
+    INPUT displayed_epoch.
+    PARAMETERS epoch_origin.
+    OUTPUT nonnegative epsilon used by the generation-weight schedule.
+    REQUIRE epoch_origin identifies how displayed epoch maps to epsilon in Eq. (17).
+    For declared zero-based warmup: first displayed training epoch maps to epsilon=0.
+    For a different explicitly declared convention, apply its stored mapping.
+    RETURN finite nonnegative epsilon.
+    With alpha=0.1, multipliers at epsilon=0,9,10 are 1,0.1,0.
+END PROCEDURE
+
+PROCEDURE BUILD_GRAPH_FOR_TRAINING(cfg,artifacts,device)
+    INPUT cfg and verified graph artifacts.
+    PARAMETERS device and the shared graph-normalization/self-loop policies.
+    OUTPUT GraphBundle for main-model training.
+    graph <- utils.BUILD_GRAPH_BUNDLE(cfg,artifacts,device).
+    RETURN graph.
+END PROCEDURE
+
+PROCEDURE BUILD_OPTIMIZER(model,optimizer_name,parameters)
+    INPUT model, optimizer_name.
+    PARAMETERS parameters.
+    OUTPUT optimizer and named parameter-group manifest.
+    REQUIRE explicitly declared optimizer family and all relevant numeric parameters.
+    Enumerate registered trainable parameters once.
+    Verify active utility parameters and fine-tuned feature encoders are included.
+    Verify fixed gravity coefficient, scalers and residual shares are excluded.
+    Partition independent generation parameters only according to declared policy.
+    Reject empty or duplicate parameter groups and nonpositive learning rates.
+    Construct chosen optimizer; legacy Adam supports explicit epsilon and base_lr.
+    Record parameter names, group policies and initialization hashes.
+    RETURN optimizer.
+END PROCEDURE
+
+PROCEDURE BUILD_DECLARED_SCHEDULER(optimizer,schedule_config)
+    INPUT optimizer, schedule_config.
+    PARAMETERS None.
+    OUTPUT scheduler object carrying its state and step-timing convention.
+    IF schedule_config.kind = none: return an explicit no-op schedule record.
+    ELSE IF kind = legacy_StepLR2:
+        Construct common StepLR2 using milestones,gamma,last_epoch,min_lr.
+    ELSE:
+        REQUIRE a fully described scheduler with known step timing and resume state.
+    Validate rate policy independently of the generation-loss weight decay.
+    RETURN scheduler and its invocation convention.
+END PROCEDURE
+
+PROCEDURE COMPARE_VALIDATION(candidate,best,tie_policy)
+    INPUT candidate, best.
+    PARAMETERS tie_policy.
+    OUTPUT boolean checkpoint-selection decision.
+    REQUIRE finite candidate; permit initial best=positive infinity.
+    IF candidate < best: return true, independently of the early-stopping min_delta.
+    IF candidate equals best exactly under the stored numeric evaluation:
+        Apply deterministic earliest/latest/simpler-checkpoint rule as configured.
+        Any tolerance used for verification must not permit a larger MAE to replace the minimum.
+    Otherwise return false.
+END PROCEDURE
+
+PROCEDURE SAVE_CHECKPOINT_BUNDLE(model,optimizer,scheduler,run_state,destination)
+    INPUT model, optimizer, scheduler, run_state, destination.
+    PARAMETERS None.
+    OUTPUT immutable saved-state identity, path, manifest and model digest.
+    Snapshot all registered parameter/buffer state coherently after an optimizer step.
+    Include encoder weights, utility coefficients and declared auxiliary state/references.
+    Include architecture signature, resolved config hash and model edition.
+    Include station_order_id,RDS_id,residual_shares_id,transform_id and graph IDs.
+    Include epoch,epsilon,global_step,best_validation_mae and selection rule.
+    Include completed_epoch,next_epoch and the checkpoint boundary convention.
+    Include optimizer/scheduler/RNG states and the scheduler's step timing for resumable bundles.
+    REQUIRE the end-of-epoch scheduler has already advanced and pending gradients are empty.
+    Include patience_reference_mae,no_improvement,sampler RNG and teacher-forcing RNG state.
+    Include canonical training sample-order hash and sampler policy so a restored RNG is applied to the same IDs.
+    Include epoch/batch/utility histories or hash-addressed history references at the same boundary.
+    For run_state.is_selected_best=true store the internal 'this state is best' flag,
+        resolving its own identity only after the checkpoint is published.
+    Include split dates, objective estimator, multiplicity and output evaluation policy.
+    Write payload and manifest to unique temporary names within the output directory.
+    Validate shapes and content hashes, then atomically publish the checkpoint identity.
+    Publish the best pointer after the complete immutable checkpoint is available.
+    RETURN saved_state with immutable id,path,manifest and model_state_digest.
+END PROCEDURE
+
+PROCEDURE EXPORT_HISTORY_AND_DIAGNOSTICS(epoch_history,batch_history,
+    utility_steps,utility_epochs,od_errors,
+    selected_validation,cfg,run_dir)
+    INPUT epoch_history, batch_history, utility_steps, utility_epochs, od_errors, selected_validation, run_dir.
+    PARAMETERS cfg.
+    OUTPUT metric tables, prediction artifacts and diagnostic export receipts.
+    Validate each epoch record has a unique displayed_epoch and actual formula index,
+        or explicit NOT_APPLICABLE for a variant with generation guidance disabled.
+    Export tabular training_validation_metrics with original compatible columns.
+    Include Epoch,Train_OD_MAE,Train_Generation_Sum,Train_Optimization_Objective.
+    Include Val_MAE,Val_RMSE,Val_WMAPE_percent and optional training-evaluation metrics.
+    Include generation weight, learning rates, elapsed time and checkpoint-selection flag.
+    Preserve missing train-evaluation intervals as blank cells, not interpolated measurements.
+    Record percent/ratio units; compatibility Train_MAPE/Val_MAPE columns are labeled ratios.
+    Export batch_history separately with actual_B and optimizer_step.
+    Export utility_steps with epoch,batch,global_step,beta_station,beta_transfer.
+    Export utility_epochs with one selected end-of-epoch value per epoch.
+    Save utility_weights.xlsx with explicit step and epoch sheets if spreadsheet export selected.
+    Save utility_weights.pdf under run_dir, not under an '.xlsx' filename as a directory.
+    IF utility trajectory export is enabled and that model branch is active:
+        REQUIRE workbook export above succeeded before invoking the workbook-reading plotter.
+        plot_step_points_from_excel(filepath=run_dir/'utility_weights.xlsx',
+            columns=['beta_station','beta_transfer'],step=cfg.diagnostics.utility_marker_step,
+            output_pdf=run_dir/'utility_weights.pdf',sheet_name=cfg.diagnostics.utility_sheet,
+            index_column=cfg.diagnostics.utility_index,index_kind=cfg.diagnostics.utility_index_kind,
+            column_units=cfg.artifacts.utility_feature_units,export_options=cfg.diagnostics.export_options).
+    END IF
+    epoch_indices <- the actual displayed_epoch entries in epoch_history.
+    train_od_losses <- epoch_history.Train_OD_MAE; val_mae <- epoch_history.Val_MAE.
+    val_wmape_ratio <- epoch_history.Val_WMAPE_percent / 100, preserving undefined statuses.
+    val_rmse <- epoch_history.Val_RMSE.
+    metric_metadata <- stored definitions, units, masks and per-horizon-then-mean reductions.
+    selection_metadata <- selected_validation checkpoint identity and selected epoch.
+    plot_training_curves(train_losses=train_od_losses,val_mae_list=val_mae,
+        val_mape_list=val_wmape_ratio,val_rmse_list=val_rmse,save_dir=run_dir,
+        epoch_history=epoch_history,loss_kind='original_scale_OD_MAE',metric_metadata=metric_metadata,
+        selection_metadata=selection_metadata,export_options=cfg.diagnostics.export_options).
+    Main convergence curve uses OD forecasting loss, as described for paper Fig. 8.
+    Save total objective and generation loss as separately labeled diagnostic curves.
+    Preserve legacy no_pinn_loss directory alias for OD-only-loss plots if requested.
+    FOR metric IN [MAE,RMSE,WMAPE]:
+        Select training autoregressive evaluation records and validation records for that metric.
+        Keep their own actual evaluated epoch coordinates and undefined/missing values.
+        plot_metric_pair(x_epochs=epoch_indices,train_values=selected training metric series,
+            validation_values=selected validation metric series,metric_name=metric,save_dir=run_dir,
+            separate_epoch_indices={train:train evaluated epochs,val:val evaluated epochs},
+            metric_definition=metric_metadata[metric].definition,units=metric_metadata[metric].units,
+            masks=metric_metadata[metric].defined_status,export_options=cfg.diagnostics.export_options).
+    END FOR
+    IF od_errors and selected_validation are available:
+        selected_pairs <- SELECT_OD_DIAGNOSTICS(od_errors,selected_validation,cfg).
+        RDS <- verified mapping from cfg.artifacts matching selected_validation.RDS_id.
+        prediction_manifest <- selected_validation provenance, sample_ids,ytime,forecast_origin,
+            valid_mask,checkpoint_id,output policy and original-scale status.
+        truth_manifest <- the matching sample/timestamp/mask metadata with truth source identity.
+        plot_od_losses(epoch_od_errors_list=od_errors.matrices,selected_pairs=selected_pairs,
+            save_path=run_dir/'selected_od_losses.pdf',evaluated_epochs=od_errors.epochs,
+            RDS=RDS,station_names=cfg.artifacts.station_names,
+            error_definition='mean_absolute_error_over_observed_samples_and_horizons',
+            selection_metadata=selection_metadata with diagnostic pair-ranking rule).
+        plot_od_time_series(y_true_all=selected_validation.y_truth,
+            y_pred_all=selected_validation.y_evaluated,selected_pairs=selected_pairs,save_dir=run_dir/'od_series',
+            prediction_manifest=prediction_manifest,truth_manifest=truth_manifest,RDS=RDS,
+            units='passengers_per_interval',horizon_policy=cfg.diagnostics.horizon_plot_policy,
+            export_options=cfg.diagnostics.export_options).
+        plot_od_time_series_first_step(y_true_all=selected_validation.y_truth,
+            y_pred_all=selected_validation.y_evaluated,selected_pairs=selected_pairs,save_dir=run_dir/'od_series',
+            prediction_manifest=prediction_manifest,truth_manifest=truth_manifest,RDS=RDS,
+            units='passengers_per_interval',export_options=cfg.diagnostics.export_options).
+    END IF
+    Export selected_validation predictions, truth, masks, sample IDs and target timestamps.
+    Include provenance and selected checkpoint hash in every diagnostic manifest.
+    Validate expected figure/table files and nonempty output before marking export complete.
+    A plotting failure is reported as a diagnostic failure, not concealed as a new model result.
+END PROCEDURE
+
+PROCEDURE SELECT_OD_DIAGNOSTICS(epoch_od_errors,selected_validation,cfg)
+    INPUT epoch_od_errors, selected_validation.
+    PARAMETERS cfg.
+    OUTPUT ranked selected real OD identities and compressed slots.
+    REQUIRE at least one per-OD error matrix and the associated evaluated epoch IDs.
+    initial <- earliest evaluated epoch's [N,K] errors.
+    RDS <- verified mapping referenced by cfg.artifacts and selected_validation.RDS_id.
+    selected <- errors for selected checkpoint, or recompute from selected_validation.
+    Create valid_pairs using real retained destinations only unless residual diagnostics requested.
+    requested_top_k <- cfg.diagnostics.requested_top_k; require a nonnegative integer.
+    declared_epsilon <- cfg.diagnostics.relative_error_epsilon; require a strictly positive finite value.
+    FOR each (origin o,retained column k), resolve physical destination d=RDS[o,k].
+    Exclude pairs with no observations or all-zero truth under the declared diagnostic rule.
+    Record why each excluded pair was omitted.
+    FOR each pair in valid_pairs:
+        IF cfg.diagnostics.diagnostic_score = relative_improvement:
+            score <- (initial[o,k]-selected[o,k])/(initial[o,k]+declared_epsilon).
+            Keep sign; a large deterioration is not an improvement.
+        ELSE IF cfg.diagnostics.diagnostic_score = absolute_relative_change:
+            score <- abs(initial[o,k]-selected[o,k])/(initial[o,k]+declared_epsilon).
+            Label this 'change magnitude', matching legacy intent without calling it improvement.
+        ELSE:
+            REQUIRE a documented alternative diagnostic selection rule.
+        END IF
+        Store pair,score,initial_error,selected_error and station names.
+    END FOR
+    Sort the scored valid_pairs using a deterministic tie rule.
+    k <- minimum(requested_top_k,number of valid_pairs); legacy requested_top_k=5.
+    Choose pairs directly from scored valid_pairs, not an unfiltered all_pairs list.
+    Label these post hoc selected illustrations; they do not establish population-wide performance.
+    RETURN selected real OD identities and compressed-column references.
+END PROCEDURE
+
+PROCEDURE POSTHOC_TEST_CURVES(epoch_checkpoints,selected_checkpoint,model,test_dataset,
+    graph,device,cfg,flags,logger)
+    INPUT epoch_checkpoints, selected_checkpoint, model, test_dataset, graph, flags, logger.
+    PARAMETERS device, cfg.
+    OUTPUT posthoc metric table and figure references.
+    REQUIRE a sealed selection manifest and completed hyperparameter/checkpoint selection.
+    REQUIRE cfg.train.run_kind is not search_trial and test_dataset contains only the requested frozen split.
+    Select saved epoch IDs by a predeclared diagnostic plotting cadence.
+    FOR each selected epoch checkpoint:
+        state <- READ_TRAINING_RESUME_BUNDLE(epoch_checkpoint.path,device,cfg).
+        Restore state.model_state strictly and verify fixed artifact IDs against test_dataset.
+        result <- EVALUATE_TRAINING_SPLIT(model,test_dataset,'test',graph,device,cfg,flags,
+            logger,state.completed_epoch,state.global_step,state.manifest).
+        Record epoch,checkpoint hash,MAE,RMSE,WMAPE and posthoc_only=true.
+    END FOR
+    Keep the sealed training/selection record unchanged during posthoc test plotting.
+    Plot a clearly labeled post hoc test curve alongside the appropriate training/validation series.
+    In a finally block restore selected_checkpoint.model_state before any final prediction export.
+    RETURN post hoc table with selection-manifest hash.
+END PROCEDURE
+
+SCRIPT ENTRY AND PROFILING
+    Parse arguments and select train or evaluation mode explicitly.
+    IF profiling requested, create a profiler immediately before main.
+    Disable profiler in a finally block and report cumulative time for the requested top count.
+    Preserve the original optional top-100 cumulative-time report capability.
+    CUDA synchronous debugging is an explicit diagnostic option, not a global import side effect.

@@ -1,0 +1,17 @@
+# Local caches and diagnostic logs
+node_modules/
+.cache/
+*.log
+__pycache__/
+
+# Research data, credentials and future experiment artifacts
+.env
+.env.*
+!.env.example
+data/
+checkpoints/
+runs/
+*.pt
+*.pth
+*.db
+local-backups/

@@ -1,0 +1,194 @@
+MODULE Get_Time_DepartFreDic
+PURPOSE Expand timetable rows into dated, directed, line-specific service records.
+PAPER Section 4.5.1 K7 and Section 4.6 Eq. (26).
+
+PROCEDURE get_station_range(line, stations, start_name, end_name)
+    INPUT line ID, ordered Station records, and requested endpoints.
+    OUTPUT inclusive station sequence in requested travel direction.
+    start_matches <- positions whose name equals start_name
+    end_matches <- positions whose name equals end_name
+    IF either match count differs from one:
+        RAISE EndpointOccurrenceError(line, start_name, end_name)
+    END IF
+    start <- first start_matches
+    finish <- first end_matches
+    step <- +1 IF finish >= start ELSE -1
+    selected <- empty list
+    position <- start
+    REPEAT:
+        APPEND stations[position] to selected
+        IF position=finish:
+            BREAK
+        END IF
+        position <- position + step
+    END REPEAT
+    RETURN selected
+END PROCEDURE
+
+PROCEDURE process_operating_stations(file_path, current_time, current_date, line_manager, df_dic;
+                                        timetable_schema, forecast_origin, service_date)
+    INPUT source workbook, local timestamp parts, network, and versioned sheet cache.
+    INPUT timetable_schema: sheets, line/direction IDs, date rules, breakpoint labels,
+            headway encoding, service boundaries, row priorities, stream aggregation and coverage rules.
+    OUTPUT (StaInOper, df_dic): sections keyed by (source, destination, line_id), and updated cache.
+    timestamp <- COMBINE current_date and current_time in timetable_schema.timezone
+    CHECK service_date identifies timestamp under timetable_schema.service_day_rule
+    file_version <- identity and version of file_path
+    covered_sections <- directed line-specific sections in line_manager
+    row_values <- empty multimap keyed by section
+    coverage_ledger <- empty multimap keyed by section
+
+    FOR EACH (sheet_name, line_id) in timetable_schema.sheet_to_line:
+        IF sheet_name is absent:
+            RECORD MISSING_SHEET for its declared required sections
+            CONTINUE
+        END IF
+        cache_key <- (file_version, sheet_name, timetable_schema.version)
+        IF cache_key is absent from df_dic:
+            raw_table <- READ sheet_name
+            df_dic[cache_key] <- PARSE raw_table using timetable_schema
+        END IF
+        table <- df_dic[cache_key]
+        breakpoint_map <- SORT parsed service-day offsets with original column labels
+        CHECK line_id including branch 44 against the explicit line manifest
+
+        FOR EACH row in table:
+            effective_period <- PARSE row.StartTime and any declared end date
+            IF effective_period does not contain service_date:
+                CONTINUE
+            END IF
+            IF row.available_at > forecast_origin:
+                RECORD UNAVAILABLE_VERSION for its declared coverage
+                CONTINUE
+            END IF
+            row_line <- RESOLVE row.InfluLine using the sheet/line rule
+            directions <- RESOLVE row.Direc using timetable_schema.direction_map
+            endpoints <- RESOLVE row.InfluSec1 and row.InfluSec2
+            IF both endpoints are absent:
+                endpoints <- declared whole-line endpoints
+            ELSE IF exactly one endpoint is absent:
+                endpoints <- timetable_schema.resolve_partial_endpoints(row)
+            END IF
+            first <- PARSE row.FirstDepart as a service-day offset
+            last <- PARSE row.LastDepart using the declared overnight rule
+            operating_window <- dated interval from service_date, first and last
+
+            FOR EACH direction in directions:
+                (start, finish) <- ORIENT endpoints for direction
+                stations <- get_station_range(row_line, line_manager.lines[row_line], start, finish)
+                sections <- consecutive directed station pairs in stations with row_line
+                FOR EACH section in sections:
+                    CHECK section is in covered_sections
+                    APPEND {operating_window, row provenance, availability} to coverage_ledger[section]
+                END FOR
+                IF timestamp lies outside operating_window:
+                    CONTINUE
+                END IF
+
+                column <- SELECT breakpoint cell using timestamp's service-day offset,
+                            breakpoint_map and timetable_schema.cell_interval_rule
+                IF column is uncovered:
+                    status <- missing
+                    headway_seconds <- NONE
+                ELSE:
+                    (headway_seconds, status) <- parse_headway_seconds(row[column], timetable_schema)
+                END IF
+                frequency <- 3600 / headway_seconds IF status=operating
+                                ELSE 0 IF status=known_closed
+                                ELSE UNCOMPUTED
+                FOR EACH section in sections:
+                    APPEND {status, headway_seconds, frequency, stream_id, priority, row provenance}
+                        to row_values[section]
+                END FOR
+            END FOR
+        END FOR
+    END FOR
+
+    StaInOper <- empty mapping
+    FOR EACH section in covered_sections:
+        candidates <- row_values[section]
+        IF candidates is nonempty:
+            value <- RESOLVE candidates by declared override priority and distinct-stream rules
+            IF equally ranked candidates conflict:
+                RAISE ConflictingScheduleRows(section, timestamp)
+            END IF
+        ELSE IF coverage_ledger proves complete coverage and all operating windows inactive:
+            value <- {status=known_closed, frequency=0, headway_seconds=NONE}
+        ELSE:
+            value <- {status=missing, frequency=UNCOMPUTED, headway_seconds=NONE}
+        END IF
+        StaInOper[section] <- Section(section.source, section.destination, section.line)
+        ATTACH value and coverage provenance to StaInOper[section]
+        SET depart_freq=value.frequency, unit=trains_per_hour
+    END FOR
+    RETURN (StaInOper, df_dic)
+END PROCEDURE
+
+PROCEDURE parse_headway_seconds(raw_value, timetable_schema)
+    INPUT a cell and its declared encoding/sentinel convention.
+    OUTPUT (seconds, status), status in {operating, known_closed, missing}.
+    IF raw_value is NULL or NaN:
+        RETURN (NONE, missing)
+    END IF
+    IF raw_value matches timetable_schema.no_service_sentinels:
+        RETURN (NONE, known_closed)
+    END IF
+    SWITCH timetable_schema.headway_encoding:
+        CASE duration:
+            seconds <- total_seconds(raw_value)
+        CASE clock_duration:
+            seconds <- hours*3600 + minutes*60 + seconds_part + fractional_seconds
+        CASE declared_text_format:
+            seconds <- PARSE raw_value using the declared H:M:S or M:S format
+        CASE numeric_minutes:
+            seconds <- raw_value * 60
+        CASE numeric_seconds:
+            seconds <- raw_value
+        CASE excel_day_fraction:
+            seconds <- raw_value * 86400
+        OTHERWISE:
+            RAISE UnsupportedHeadwayEncoding
+    END SWITCH
+    IF seconds is not finite or seconds <= 0:
+        RAISE InvalidOperatingHeadway(raw_value)
+    END IF
+    RETURN (seconds, operating)
+END PROCEDURE
+
+PROCEDURE Get_Time_DepartFreDic(suzhou_sub_data_file_path, Time_DepartFreDic_filename,
+                                time_interval, excel_path, graph_sz_conn_root,
+                                station_index_root, start_date_str, end_date_str,
+                                station_manager_dict_root, result_API_root;
+                                timetable_schema, forecast_origin_policy)
+    INPUT inclusive service-date range, positive interval, input/output paths, schema and origin policy.
+    OUTPUT {Time_DepartFreDic, artifact}: timestamp records and their saved descriptor.
+    first_date <- PARSE start_date_str
+    last_date <- PARSE end_date_str
+    CHECK first_date <= last_date and time_interval > 0
+    (station_manager, line_manager) <- request_suzhou_metro_data(
+        excel_path, graph_sz_conn_root, station_index_root, station_manager_dict_root, result_API_root;
+        network_schema=timetable_schema.network_schema)
+    Time_DepartFreDic <- empty mapping
+    df_dic <- empty sheet cache
+    FOR EACH service_date from first_date through last_date:
+        start <- service_boundary(service_date)
+        finish <- service_boundary(service_date + one calendar day)
+        timestamps <- interval starts in [start, finish) under time_interval and the DST/final-interval policy
+        FOR EACH timestamp in timestamps:
+            forecast_origin <- forecast_origin_policy.resolve(timestamp)
+            (sections, df_dic) <- process_operating_stations(
+                suzhou_sub_data_file_path, timestamp.time, timestamp.date, line_manager, df_dic;
+                timetable_schema, forecast_origin, service_date)
+            available_at <- latest availability among the selected section records and coverage evidence
+            Time_DepartFreDic[timestamp] <- {
+                sections, timestamp, service_date, time_interval,
+                station_manifest_id, line_manifest_id, timetable_version,
+                available_at, unit=trains_per_hour
+            }
+        END FOR
+    END FOR
+    CHECK full timestamp keys are unique and match the requested grid
+    payload <- convert_objects_to_dict(Time_DepartFreDic; timetable_schema.serialization_policy)
+    artifact <- WRITE payload to Time_DepartFreDic_filename with schema and units
+    RETURN {Time_DepartFreDic, artifact}
+END PROCEDURE

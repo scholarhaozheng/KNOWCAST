@@ -1,0 +1,308 @@
+MODULE Generating_Metro_Related_data
+PURPOSE Build metro topology, enumerate candidate routes, and index OD/path/section incidences.
+PAPER Sections 4.5.1-4.5.3, Equations (21)-(24); Section 4.7.
+
+SCHEMA
+    station_index: canonical station name to immutable zero-based integer index in 0..N-1.
+    line_manager: line identifiers, ordered stops, and directed service links.
+    route: a continuous same-line segment with endpoints and ordered stations.
+    path: ordered route segments and their complete station/line traversal sequence.
+    route_graph: directed single-physical-section arcs with line IDs, expanded by incoming-line state.
+    Legacy multi-section Route arcs are expanded before shortest/k-shortest search, then may be merged for display.
+    transfer_bias: nonnegative enumeration penalty in declared search-cost units.
+    path_number: unique identifier in this generated artifact.
+    OD_path_dic: ordered real OD pair to distinct candidate path records.
+    section_path_dic: directed section to path records using that section.
+    path_section_dic: path identifier to its ordered directed sections.
+    SUPPORT: candidate availability is subsequently checked against each service snapshot.
+
+PROCEDURE get_same_lines
+    INPUT from_station, to_station.
+    OUTPUT ordered distinct common line identifiers.
+    READ line memberships of from_station.
+    READ line memberships of to_station.
+    INTERSECT memberships by canonical line identifier.
+    REMOVE duplicates.
+    ORDER common lines by the declared line registry.
+    RETURN the common line list, possibly empty.
+    NOTE shared membership alone does not prove an uninterrupted operating segment.
+END PROCEDURE
+
+PROCEDURE dijkstra
+    INPUT v_matrix, start_index, end_index, bias.
+    INPUT initial_incoming_line for a spur search, or START for a new OD search.
+    OUTPUT shortest declared search cost and reconstructed path, or UNREACHABLE.
+    REQUIRE valid endpoint indices and nonnegative search costs.
+    REQUIRE each movement arc traverses exactly one physical directed section on one line.
+    EXPAND multi-section shortcuts before search; preserve their complete station/line sequences.
+    EXCLUDE zero-length same-station movement arcs; actual line changes are charged on the next movement.
+    INTERPRET absent arcs as unavailable, not as cost 9999.
+    IF start_index equals end_index:
+        RETURN zero cost and an explicit zero-length path status.
+    END IF
+    DEFINE each search state as (station_index, incoming_line_or_START).
+    RETAIN incoming-line identity even when arcs represent complete same-line route segments.
+    Distinct arrivals at the same physical station can have different remaining transfer costs.
+    INITIALIZE the start state with initial_incoming_line, preserving a spur root's line context.
+    INITIALIZE distance of every state to infinity.
+    INITIALIZE predecessor of every state to absent.
+    INITIALIZE visited flags to false.
+    SET start-state distance to zero.
+    INSERT start state into a minimum-priority frontier.
+    WHILE frontier is not empty:
+        REMOVE the state u with smallest tentative distance.
+        IF u has already been finalized:
+            CONTINUE.
+        END IF
+        MARK u finalized.
+        IF u satisfies the target-state condition:
+            STOP the search with the current best target.
+        END IF
+        FOR EACH available outgoing route arc from state u:
+            CHECK arc continuity and valid stop count.
+            v <- (arc.destination_station, arc.line_identifier).
+            arc_cost <- declared station traversal cost.
+            IF u.incoming_line is neither START nor arc.line_identifier:
+                ADD bias to arc_cost for that actual line change.
+            END IF
+            candidate_cost <- distance[u] + arc_cost.
+            IF candidate_cost improves distance[v]:
+                STORE candidate_cost.
+                STORE predecessor state and the selected route arc.
+                INSERT updated v with a deterministic unique queue tie counter.
+            END IF
+        END FOR
+    END WHILE
+    IF no target state was reached:
+        RETURN UNREACHABLE with no path object.
+    END IF
+    SELECT the cheapest finalized arrival-line state at the terminal station.
+    RECONSTRUCT route segments by following state-specific predecessor links backward.
+    REVERSE the reconstructed sequence.
+    VERIFY start, end, and continuity of all segments.
+    RETURN complete path cost and an independent path record.
+END PROCEDURE
+
+PROCEDURE yen_ksp
+    INPUT start_station, terminal_station, k, v_matrix, bias.
+    INPUT station_index, line_manager, station_manager.
+    OUTPUT at most k distinct feasible loopless candidate paths.
+    REQUIRE k is a declared positive integer.
+    LOOK UP both station indices.
+    KEEP an immutable copy of the original route graph.
+    CALL dijkstra for the first shortest path.
+    IF no path exists:
+        RETURN an empty candidate set with disconnected-OD status.
+    END IF
+    INITIALIZE accepted_paths with the first path.
+    INITIALIZE accepted_signatures with its declared path identity.
+    INITIALIZE a minimum-priority candidate collection.
+    INITIALIZE candidate_signatures for deduplication.
+    WHILE accepted_paths contains fewer than k paths:
+        latest <- most recently accepted path.
+        ENUMERATE each eligible spur position before its terminal station.
+        FOR EACH spur position:
+            root <- prefix of latest ending at the spur state.
+            COPY the original route graph into a working graph.
+            FOR EACH accepted path sharing that exact root:
+                IDENTIFY its next directed transition after the root.
+                TEMPORARILY exclude that transition in the working graph.
+                Use the expanded directed section/line transition identity; no shortcut may bypass exclusion.
+            END FOR
+            TEMPORARILY exclude every incoming-line state of each physical root-prefix station before the spur.
+            ENUMERATE spur positions at every physical station, including former shortcut interiors.
+            CALL dijkstra from the spur station to terminal on the working graph.
+            SUPPLY the root's incoming line as the spur search's initial line context.
+            IF no spur path is feasible:
+                DISCARD this spur attempt.
+                CONTINUE to the next spur position.
+            END IF
+            COMBINE root and spur without duplicating their shared boundary station.
+            VERIFY all route segments remain continuous.
+            VERIFY the resulting path starts and ends at the requested stations.
+            CHECK the declared loopless condition.
+            RECOMPUTE the total search cost of the complete combined path.
+            RANK the complete root-plus-spur cost.
+            signature <- ordered station-and-line identity under the declared convention.
+            IF signature is neither accepted nor already queued:
+                INSERT path with total cost and deterministic tie key.
+                RECORD its candidate signature.
+            END IF
+            DISCARD the working graph; never leave exclusions in the original.
+        END FOR
+        IF no valid candidate remains:
+            BREAK with fewer than k paths.
+        END IF
+        REMOVE the lowest-cost candidate.
+        IF duplicate or invalid:
+            CONTINUE removing candidates until valid or the collection is empty.
+        END IF
+        IF the collection exhausted without a valid candidate:
+            BREAK; do not loop indefinitely.
+        END IF
+        APPEND the valid candidate to accepted_paths.
+        RECORD its signature.
+    END WHILE
+    RETURN accepted_paths with search settings and candidate-count diagnostics.
+END PROCEDURE
+
+PROCEDURE yen_ksp.contains_subsequence
+    INPUT sequence, subsequence.
+    OUTPUT whether subsequence occurs contiguously in sequence.
+    IF subsequence has length zero:
+        RETURN true under the explicitly declared empty-sequence convention.
+    END IF
+    IF subsequence is longer than sequence:
+        RETURN false.
+    END IF
+    FOR start position from first through last possible alignment:
+        COMPARE every aligned element in order.
+        IF all elements match:
+            RETURN true.
+        END IF
+    END FOR
+    RETURN false.
+    NOTE Yen root matching needs an equal prefix, not merely any interior subsequence.
+END PROCEDURE
+
+PROCEDURE find_routes
+    INPUT exist_path_number, OD_path_dic, section_path_dic, path_section_dic.
+    INPUT start_station, terminal_station, v_matrix, bias.
+    INPUT station_index, line_manager, station_manager, k.
+    OUTPUT next unused path number and updated three incidence dictionaries.
+    top_k_paths <- yen_ksp with the supplied ordered OD pair.
+    INITIALIZE paths_info for this OD pair.
+    FOR EACH distinct returned path:
+        VERIFY endpoints match the OD dictionary key.
+        CONSTRUCT path_info.path_number from exist_path_number.
+        COPY from_stop and to_stop names.
+        COPY start_index and end_index.
+        COPY ordered route segments.
+        COPY complete station_visit_sequence_index.
+        COPY corresponding stable station identifiers.
+        DERIVE number_of_stations using the declared endpoint-counting convention.
+        DERIVE number_of_transfers from actual line changes.
+
+        RECORD the line sequence and path signature.
+        APPEND path_info to paths_info.
+        INITIALIZE path_section_dic[path_number] as an empty ordered list.
+        FOR EACH route segment:
+            CALL print_route_info for the optional route diagnostic.
+            FOR EACH consecutive station pair eta, mu on the segment:
+                VERIFY it is a physical directed section of the indicated line.
+                APPEND that directed section to path_section_dic[path_number].
+                ADD the path reference to section_path_dic[(eta,mu)].
+            END FOR
+        END FOR
+        RECONCILE repeated transfer-boundary stations between segments.
+        DEDUPLICATE section-to-path references under binary incidence semantics.
+        CHECK every path section points back to this path in the inverse dictionary.
+        INCREMENT exist_path_number.
+    END FOR
+    STORE paths_info under OD_path_dic[(start_station,terminal_station)].
+    IF no candidate was found:
+        STORE explicit empty/disconnected status.
+    END IF
+    RETURN updated counter and dictionaries.
+END PROCEDURE
+
+PROCEDURE print_route_info
+    INPUT each_route, line_manager.
+    OUTPUT optional human-readable route summary.
+    REPORT line identifier, route start, route end, and traversal count.
+    LOOK UP the line's canonical ordered station list.
+    REPORT stations in the actual traversal direction.
+    CHECK that printed endpoints equal the route endpoints.
+    IF the route cannot be resolved in the line registry:
+        REPORT an invalid-route diagnostic instead of a fabricated itinerary.
+    END IF
+END PROCEDURE
+
+PROCEDURE Generating_Metro_Related_data
+    INPUT excel_path, graph_sz_conn_root, station_index_root, station_manager_dict_root.
+    INPUT result_API_root, suzhou_sub_data_file_path, timetable artifact paths.
+    INPUT time_interval, OD/path artifact paths, train_filename, date bounds.
+    INPUT network_schema and optional already verified network_bundle.
+    OUTPUT station topology and the OD/path/section dictionary bundle.
+    IF a verified network_bundle is supplied:
+        REUSE its station_manager,line_manager and matching immutable manifest without loading again.
+    ELSE:
+        REQUEST the five declared network paths through MetroRequester_SuZhou,
+            explicitly passing network_schema; RECEIVE station_manager and line_manager.
+    END IF
+    FREEZE station_order and station_index.
+    VALIDATE physical adjacency and line-specific directed continuity.
+    OBTAIN requested k and search bias from configuration or the interactive helper.
+    RECORD their provenance as enumeration settings.
+    INITIALIZE a route graph for the declared station order.
+    FOR EACH ordered station pair i,j:
+        IF i=j, record the diagonal policy and continue without constructing a movement arc.
+        common_lines <- get_same_lines(station_i, station_j).
+        BUILD valid same-line route alternatives in each allowed direction.
+        PRESERVE parallel line alternatives when they differ operationally.
+        EXPAND every valid route alternative into its adjacent directed section/line arcs.
+        DEDUPLICATE identical directed physical-section/line arcs, retaining parallel distinct line IDs.
+        IF no route exists:
+            STORE an unavailable arc, not a traversable sentinel route.
+        END IF
+    END FOR
+    SELECT manual or automatic enumeration mode.
+    INITIALIZE path counter and all three dictionaries once per run.
+    IF manual mode:
+        CALL get_valid_station_input for origin.
+        CALL get_valid_station_input for destination.
+        APPLY the declared same-station OD policy.
+        CALL find_routes for this ordered pair.
+        RETURN the resulting candidate and incidence bundle.
+    ELSE IF automatic mode:
+        FOR EACH origin in station_order:
+            FOR EACH destination in station_order:
+                IF origin equals destination:
+                    RECORD the declared same-station status.
+                    CONTINUE.
+                END IF
+                COPY or immutably reference the unmodified route graph.
+                CALL find_routes INSIDE these nested loops.
+                KEEP the returned monotonically increasing path counter.
+            END FOR
+        END FOR
+        VERIFY every requested ordered OD pair has a result status.
+        BUILD bundle.OD_path_dic.
+        BUILD bundle.section_path_dic.
+        BUILD bundle.path_section_dic.
+        ADD station order, line order, enumeration policy, and input fingerprints.
+        VALIDATE reciprocal incidence consistency.
+        SAVE the bundle under train_filename or the declared neutral topology filename.
+        NOTE train_filename is a legacy name; topology is not demand-fitted training data.
+        RETURN the bundle and generation report.
+    ELSE:
+        REPORT invalid mode and request or require a valid configuration.
+    END IF
+    Retained timetable/path-probability path arguments belong to downstream conversion stages.
+END PROCEDURE
+
+PROCEDURE Generating_Metro_Related_data.get_input_or_default
+    INPUT prompt, declared default.
+    OUTPUT validated integer option or cancellation status.
+    READ the configured value first in noninteractive execution.
+    OTHERWISE display the prompt and the explicit default.
+    IF input is empty:
+        RETURN the declared default with a default-used flag.
+    END IF
+    PARSE an integer without truncating decimal text.
+    IF parsing fails or value violates the option's range:
+        REPORT the valid domain and retry or return configuration failure.
+    END IF
+    RETURN the validated option.
+END PROCEDURE
+
+PROCEDURE Generating_Metro_Related_data.get_valid_station_input
+    INPUT prompt, station_index.
+    OUTPUT canonical station name or cancellation status.
+    READ a supplied or interactive station name.
+    NORMALIZE only reviewed aliases.
+    IF the resulting name is in station_index:
+        RETURN that canonical name.
+    END IF
+    REPORT the unknown name and require a valid station.
+END PROCEDURE

@@ -1,0 +1,94 @@
+MODULE lib.metrics
+STATUS non-executable metric specification preserving the four original entry points
+PAPER §5.1.3, Eqs.34–37; compute a metric per horizon, then average horizons
+
+SHARED CONTRACT
+    Predictions and labels have identical shape and passenger-flow units.
+    Validity masks exclude loader padding and declared unavailable observations.
+    A true zero passenger count is valid and must not be removed from MAE/RMSE.
+    Nonfinite values are errors unless an explicitly declared mask accounts for them.
+    No implicit replacement of invalid forecasts with perfect zero errors is allowed.
+    These four original names are retained; the old MAPE name denotes WMAPE.
+    Masked in a function name does not prescribe a demand threshold.
+
+PROCEDURE VALID_ELEMENTS(preds, labels, valid_mask)
+    INPUT preds, labels, valid_mask.
+    PARAMETERS None.
+    OUTPUT paired selected prediction/truth arrays and valid element count.
+    REQUIRE exact shape equality before any arithmetic.
+    mask <- BROADCAST_BOOLEAN_MASK(valid_mask,shape=SHAPE(preds),axes=declared_mask_axes).
+    p <- preds[mask]; y <- labels[mask].
+    REQUIRE selected p and y are finite.
+    count <- LENGTH(p).
+    RETURN p,y,count.
+END PROCEDURE
+
+PROCEDURE masked_mse_np(preds, labels, valid_mask)
+    INPUT preds, labels, valid_mask.
+    PARAMETERS None.
+    OUTPUT mean squared error or an explicit undefined status.
+    (p,y,count) <- VALID_ELEMENTS(preds, labels, valid_mask).
+    IF count = 0, RETURN UNDEFINED(reason='no_valid_observations') before dividing.
+    squared_error_sum <- 0 in a sufficiently precise accumulator.
+    FOR EACH valid paired element i:
+        difference <- p[i] - y[i].
+        squared_error_sum <- squared_error_sum + difference*difference.
+    END FOR
+    RETURN squared_error_sum / count.
+END PROCEDURE
+
+PROCEDURE masked_rmse_np(preds, labels, valid_mask)
+    INPUT preds, labels, valid_mask.
+    PARAMETERS None.
+    OUTPUT root mean squared error or an explicit undefined status.
+    mse <- masked_mse_np(preds, labels, valid_mask).
+    IF mse is UNDEFINED, RETURN that same reason without taking a square root.
+    REQUIRE mse is finite and nonnegative.
+    RETURN SQUARE_ROOT(mse).
+END PROCEDURE
+
+PROCEDURE masked_mae_np(preds, labels, valid_mask)
+    INPUT preds, labels, valid_mask.
+    PARAMETERS None.
+    OUTPUT mean absolute error or an explicit undefined status.
+    (p,y,count) <- VALID_ELEMENTS(preds, labels, valid_mask).
+    IF count = 0, RETURN UNDEFINED(reason='no_valid_observations').
+    absolute_error_sum <- 0.
+    FOR EACH paired element i:
+        absolute_error_sum <- absolute_error_sum + ABS(p[i]-y[i]).
+    END FOR
+    RETURN absolute_error_sum / count.
+END PROCEDURE
+
+PROCEDURE masked_mape_np(preds, labels, valid_mask, zero_total_policy)
+    INPUT preds, labels, valid_mask.
+    PARAMETERS zero_total_policy.
+    OUTPUT WMAPE ratio or the selected zero-total status.
+    (p,y,count) <- VALID_ELEMENTS(preds, labels, valid_mask).
+    IF count = 0, RETURN UNDEFINED(reason='no_valid_observations').
+    REQUIRE truth values are nonnegative passenger counts.
+    numerator <- SUM_i ABS(p[i]-y[i]).
+    denominator <- SUM_i y[i].
+    IF denominator = 0:
+        IF zero_total_policy = 'error', RAISE an undefined-WMAPE-total error.
+        ELSE IF zero_total_policy = 'undefined', RETURN UNDEFINED(reason='zero_observed_total').
+        ELSE IF zero_total_policy = 'zero_if_both_zero_else_undefined':
+            IF numerator = 0, RETURN the explicitly declared convention value 0.
+            ELSE RETURN UNDEFINED(reason='positive_error_with_zero_observed_total').
+        ELSE RAISE an unspecified-zero-total-policy error.
+    END IF
+    RETURN numerator / denominator as a ratio.
+END PROCEDURE
+
+PROCEDURE segmented_smape(preds, labels, valid_mask, epsilon)
+    INPUT preds, labels, valid_mask.
+    PARAMETERS epsilon.
+    OUTPUT SMAPE percent or an explicit undefined status.
+    REQUIRE epsilon is recorded; the paper reports 10^-6.
+    REQUIRE epsilon is finite and strictly positive before computing the denominator.
+    (p,y,count) <- VALID_ELEMENTS(preds, labels, valid_mask).
+    IF count = 0, RETURN UNDEFINED(reason='no_valid_observations').
+    score <- SUM_i ABS(p[i]-y[i]) / ((ABS(p[i])+ABS(y[i]))/2 + epsilon).
+    RETURN 100 * score/count.
+END PROCEDURE
+END MODULE

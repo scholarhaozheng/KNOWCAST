@@ -1,0 +1,84 @@
+MODULE RecurrentGCN_for_trip_generation
+PURPOSE Recurrent generation estimator used independently of the main OD learner.
+PAPER Sections 4.3.1-4.3.2; Equation (14).
+
+CLASS RecurrentGCN
+    STATE feature_schema and station_order_id.
+    STATE node_features: declared number F of input covariates.
+    STATE hidden_units: declared hidden dimension H.
+    STATE output_dim: declared scalar-per-task or explicitly grouped output dimension.
+    STATE diffusion_order: supplied diffusion-convolution setting K.
+    STATE recurrent_parameters: trainable generation-network parameters.
+    STATE output_projection: trainable mapping from hidden states to generation outputs.
+    STATE activation_policy: explicit option, legacy SELU when selected.
+    STATE output_nonnegativity_policy: explicit implementation choice.
+    STATE sequence_state: reset or supplied at sequence boundaries, never global across shuffled samples.
+    CONTRACT input x has shape [batch,N,F] or a declared single-sample equivalent.
+    CONTRACT previous hidden state has shape [batch,N,H].
+    CONTRACT output has shape [batch,N,output_dim].
+    CONTRACT state and output use exactly the input's station order.
+END CLASS
+
+PROCEDURE RecurrentGCN.__init__
+    INPUT node_features, hidden_units, output_dim, K.
+    INPUT feature schema, station order, activation/output policies.
+    CHECK every dimension is positive and explicitly supplied.
+    CHECK node_features equals the prepared feature-schema width.
+    CONSTRUCT the declared diffusion-convolution recurrent operator.
+    RETAIN directed graph message and diffusion conventions in model metadata.
+    CONSTRUCT a learnable hidden-to-output projection.
+    INITIALIZE parameters using the declared initialization policy.
+    REGISTER all trainable parameters for the generation optimizer.
+    SET sequence_state to an uninitialized boundary status.
+    STORE structural metadata needed to reload a trained artifact.
+
+    RETURN the initialized estimator.
+END PROCEDURE
+
+PROCEDURE RecurrentGCN.forward
+    INPUT x, edge_index, edge_weight.
+    INPUT previous_hidden and explicit sequence-boundary indicator.
+    OUTPUT generation_prediction and next_hidden.
+    VALIDATE x feature count and station count.
+    VALIDATE graph endpoint indices and weight ordering.
+    graph <- {edge_index,edge_weight}.
+    IF a new independent sequence begins:
+        SET previous_hidden to the declared zero state with shape [batch,N,H].
+    ELSE:
+        REQUIRE previous_hidden aligned to this sequence and station order.
+    END IF
+    next_hidden <- DCRNN_RECURRENT_UPDATE(x, graph, previous_hidden, recurrent_parameters).
+    readout_hidden <- declared output activation applied to next_hidden.
+    raw_prediction <- output_projection(readout_hidden).
+    KEEP next_hidden as the recurrent operator's original state for the next time step.
+    prediction <- output_nonnegativity_policy(raw_prediction).
+    APPLY the same declared output constraint during fitting and evaluation.
+    VERIFY prediction shape is [batch,N,output_dim].
+    RETURN prediction and next_hidden without detaching the training graph.
+END PROCEDURE
+
+PROCEDURE forecast_sequence(estimator, context)
+    INPUT estimator with saved encoder/decoder architecture, transforms and sequence contract.
+    INPUT context: encoder_covariates[L_aux_h,N,F], decoder_covariates[L_aux_f,N,F],
+            input_times, decoder_times, graph, forecast_cutoff, feature/target transform IDs.
+    OUTPUT {values[L_aux_f,N], target_times, representation, transform_id}.
+    state <- estimator.sequence_contract.initial_state
+    FOR EACH x in context.encoder_covariates, oldest to newest:
+        (estimate,state) <- estimator.forward(x,context.graph.edge_index,context.graph.edge_weight,
+                            previous_hidden=state,sequence_boundary on first step)
+    END FOR
+    decoder_state <- estimator.sequence_contract.transfer_state(state)
+    predictions <- empty list
+    FOR h from 0 through context.L_aux_f-1:
+        x_future <- context.decoder_covariates[h]
+        feedback <- estimator.sequence_contract.feedback_for_step(h, predictions)
+        decoder_state <- estimator.declared_decoder_step(x_future,feedback,context.graph,decoder_state)
+        prediction[N,1] <- estimator.output_projection_and_constraint(decoder_state)
+        APPEND prediction[:,0] to predictions
+    END FOR
+    RETURN {
+        values=STACK predictions as [L_aux_f,N], target_times=context.decoder_times,
+        representation=estimator.target_representation,
+        transform_id=estimator.target_transform_id
+    }
+END PROCEDURE

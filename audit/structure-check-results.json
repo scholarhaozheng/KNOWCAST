@@ -1,0 +1,10 @@
+{
+  "check_kind": "actual_declaration_and_coverage_hash_check",
+  "source_files": 42,
+  "algorithm_files": 46,
+  "source_declarations": 200,
+  "covered_declarations": 200,
+  "executed_pseudocode": false,
+  "behavioral_correctness_proven": false,
+  "errors": []
+}

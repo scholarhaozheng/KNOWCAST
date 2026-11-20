@@ -1,0 +1,32 @@
+MODULE Find_project_root
+PURPOSE Resolve the project directory from configuration or an upward marker search.
+PAPER Infrastructure.
+
+PROCEDURE Find_project_root(marker=ABSENT; explicit_root=ABSENT, root_schema)
+    INPUT optional explicit root, caller-selected marker and required project layout.
+    OUTPUT canonical absolute project path.
+    IF explicit_root is present:
+        root <- CANONICALIZE explicit_root
+        CHECK root is a directory matching root_schema
+        RETURN root
+    END IF
+    marker <- caller-selected project marker, including ".idea" only when explicitly selected
+    CHECK marker is a relative name without parent traversal
+    current <- CANONICALIZE directory containing this module
+    visited <- empty set
+    REPEAT:
+        IF current is in visited:
+            RAISE FilesystemCycle
+        END IF
+        ADD current to visited
+        IF current/marker exists and current matches root_schema:
+            RETURN current
+        END IF
+        parent <- parent_directory(current)
+        IF parent=current:
+            BREAK
+        END IF
+        current <- parent
+    END REPEAT
+    RAISE ProjectRootNotFound(marker, visited)
+END PROCEDURE

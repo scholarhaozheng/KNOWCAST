@@ -1,0 +1,154 @@
+MODULE PYGT_signal_generation_one_hot
+PURPOSE Build aligned graph-temporal signals for production and attraction estimation.
+PAPER Sections 4.3.1-4.3.2, Equation (14); Section 5.1.2.
+
+PROCEDURE PYGT_signal_generation
+    INPUT base_dir, prefix, station_manager_dict_name, graph_sz_conn_no_name.
+    INPUT station_manager_dict_file_path, graph_sz_conn_root.
+    INPUT train_result_array_OD_or_DO_file_path, normalization_params_file_path.
+    INPUT str_prdc_attr, Using_lat_lng_or_index.
+    INPUT station static features, holiday calendar, event records, feature contract.
+    INPUT generation_covariate_profile from the selected full or temporal-only experiment.
+    OUTPUT task-specific temporal signal artifact and feature schema.
+    LOAD station manager dictionary.
+    LOAD graph adjacency/weights.
+    LOAD raw OD and generation-label artifact.
+    VERIFY all three use the same station order.
+    REQUIRE N graph rows and N graph columns.
+    NORMALIZE legacy str_prdc_attr=prdc/attr to canonical task=production/attraction.
+    ACCEPT those canonical task names directly; reject every other task value.
+    SELECT target key by task:
+        production -> Trip_Production_In_Station_or_Out_Station.
+        attraction -> Trip_Attraction_In_Station_or_Out_Station.
+    SORT selected target timestamps chronologically.
+    REQUIRE timestamps unique and inside the declared split.
+    REQUIRE generation_covariate_profile is full or temporal_only.
+    BUILD ordered feature_schema for the paper covariates.
+    IF generation_covariate_profile = full:
+        LOAD validated static demographics and their explicit canonical/legacy field map.
+        JOIN by canonical station identity and REINDEX to station_order.
+        REQUIRE PopAct,AgePct_work,EduPct_primary,EduPct_junMid,EduPct_senHigh,EduPct_tertiary,HHSize.
+        IF mandatory values are missing:
+            APPLY the declared missing-feature policy with an explicit status.
+        END IF
+        ADD those canonical columns, with population counts, shares and persons/household units.
+    ELSE:
+        OMIT all socio-demographic columns and do not load their artifacts.
+        REQUIRE station-identity/coordinate extensions disabled for the named Case 2c experiment.
+        LABEL any such added static extension as a different variant.
+    END IF
+    ADD weekend/public-holiday indicator.
+    ADD continuous time of day in hours.
+    ADD season under an explicit categorical encoding.
+    ADD event intensity under an explicit calculation and availability policy.
+    IF optional station identity is requested:
+        FIT a category map from the declared network registry.
+        RECORD that it augments, rather than replaces, Equation (14).
+    END IF
+    IF optional latitude/longitude are requested:
+        VERIFY coordinate order and CRS.
+        ADD separately named coordinate columns.
+        RECORD their transformation and extension status.
+    END IF
+    INTERPRET Using_lat_lng_or_index only as this documented optional branch.
+    INITIALIZE features, targets, temporal metadata, and availability lists.
+    FOR EACH timestamp t:
+        CREATE feature_matrix[N,F] under feature_schema.
+        CREATE target_vector[N].
+        DERIVE local calendar date and clock time.
+        DETERMINE weekend status from the declared calendar.
+        DETERMINE public-holiday status from the provided holiday table.
+        SET Wknd true for weekend or public holiday.
+        COMPUTE TOD as hours elapsed since local civil midnight, including sub-hour precision.
+        REQUIRE 0 <= TOD < 24; keep service_date separately for operating-day grouping.
+
+        ENCODE season using the provided category map.
+        FOR EACH station m in canonical order:
+            IF generation_covariate_profile=full, COPY the station's validated demographic features.
+            ADD Wknd, TOD, and season values.
+            SELECT relevant announced events near the station.
+            USE the paper's within-1-km event scope with a declared geographic distance method.
+            KEEP this event radius distinct from the 800-m demographic population catchment.
+            COMBINE attendance and temporal proximity using supplied weights.
+            REQUIRE the intensity scaling to the stated [0,1] interval.
+
+            STORE event input's issue time and source.
+            ADD any explicitly enabled identity or coordinate extension.
+            READ the selected generation target for station m and time t.
+            STORE it as a scalar in target_vector[m].
+        END FOR
+        CHECK all feature columns match their schema types and units.
+        CHECK target vector has exactly N values.
+        CHECK labels are finite and nonnegative when valid.
+        APPEND feature_matrix, target_vector, and timestamp together.
+        APPEND temporal metadata, including raw weekday and minutes if retained for diagnostics.
+        APPEND availability metadata.
+    END FOR
+    DECLARE which feature columns are continuous, categorical, and indicators.
+    IF prefix is training:
+        SELECT only the fitting subset named in the normalization manifest.
+        IF an internal chronological holdout is used:
+            EXCLUDE its feature rows from fitted transform statistics.
+        END IF
+        FOR EACH continuous column:
+            FIT mean and scale on the declared fitting rows.
+            IF the column is constant:
+                RECORD a constant-feature transform instead of dividing by zero.
+            END IF
+        END FOR
+        FREEZE the transform and categorical schema.
+        SAVE them with station order and fitting timestamp provenance.
+    ELSE:
+        LOAD the previously fitted transform.
+        VERIFY feature names, units, ordering, and category maps match.
+    END IF
+    TRANSFORM continuous columns under the frozen normalization rules.
+    LEAVE categorical and binary encodings under their declared transformations.
+    RETAIN targets in original flow units unless target scaling is explicitly declared.
+    IF target scaling is used:
+        STORE its own invertible training-fitted transform separately.
+    END IF
+    ENUMERATE nonzero physical graph edges in the declared message direction.
+    STORE source and destination indices in edge_index.
+    STORE matching edge weights without reordering them independently.
+    VERIFY every edge endpoint lies in station_order.
+    BUILD signal_dict.features.
+    BUILD signal_dict.targets.
+    BUILD signal_dict.additional_feature.
+    BUILD signal_dict.edge_index.
+    BUILD signal_dict.edge_weight.
+    ADD timestamps, schema, station_order, availability, and split manifest.
+    WRITE prefix_task_signal_dict using task-specific naming.
+    RECORD any prdc/attr filename aliases explicitly; task identity is canonical in the manifest.
+    VERIFY serialized time and station axes.
+    RETURN signal artifact and transformation receipt.
+END PROCEDURE
+
+PROCEDURE build_generation_windows(signal, L_h, L_f, forecast_origins, sequence_policy)
+    INPUT timestamp-indexed covariates/targets, auxiliary lengths and sequence/availability policy.
+    OUTPUT {examples, rejected, sequence_contract}.
+    examples <- empty list
+    rejected <- empty list
+    delta <- sequence_policy.interval_duration
+    FOR EACH t0 in forecast_origins:
+        input_times <- [t0-L_h*delta, ..., t0-delta]
+        target_times <- [t0, ..., t0+(L_f-1)*delta]
+        encoder <- SELECT full covariate window by input_times and available_at <= t0
+        decoder <- SELECT required target-time covariates available or forecastable by t0
+        targets <- SELECT offline generation labels at target_times
+        resolution <- sequence_policy.resolve_missing(encoder, decoder, targets)
+        IF resolution.status=REJECT:
+            APPEND {t0, resolution.reason} to rejected
+            CONTINUE
+        END IF
+        (encoder, decoder, targets, masks) <- resolution.complete_example
+        sample_id <- stable auxiliary task/window ID
+        APPEND {sample_id, forecast_origin=t0, input_times, target_times,
+                encoder_covariates=encoder, decoder_covariates=decoder,
+                targets, masks, station_order_id, graph_id} to examples
+    END FOR
+    sequence_contract <- {L_aux_h=L_h, L_aux_f=L_f, interval_duration=delta,
+                            covariate_schema, target_offset_rule=sequence_policy.target_offset_rule,
+                            rollout_policy=sequence_policy.rollout_policy}
+    RETURN {examples, rejected, sequence_contract}
+END PROCEDURE

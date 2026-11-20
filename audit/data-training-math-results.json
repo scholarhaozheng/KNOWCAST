@@ -1,0 +1,213 @@
+{
+  "artifact_kind": "independent_data_training_formula_reference_checks",
+  "executed_pseudocode": false,
+  "executed_original_code": false,
+  "trained_model": false,
+  "reproduced_paper_results": false,
+  "dependencies": [
+    "Python standard library"
+  ],
+  "checks_passed": 9,
+  "checks": [
+    {
+      "name": "unfinished_allocation_and_observed_zero",
+      "status": "passed",
+      "expected_nonzero": [
+        2,
+        4,
+        6
+      ],
+      "actual_nonzero": [
+        2.0,
+        4.0,
+        6.0
+      ],
+      "expected_zero": [
+        4,
+        4,
+        4
+      ],
+      "actual_zero": [
+        4.0,
+        4.0,
+        4.0
+      ],
+      "missing_history": "not treated as an observed zero"
+    },
+    {
+      "name": "Eq15_residual_destination_totals",
+      "status": "passed",
+      "expected_production": [
+        16,
+        28,
+        34
+      ],
+      "actual_production": [
+        16.0,
+        28.0,
+        34.0
+      ],
+      "expected_attraction": [
+        35.5,
+        16,
+        26.5
+      ],
+      "actual_attraction": [
+        35.5,
+        16.0,
+        26.5
+      ],
+      "total_flow": 78,
+      "origin_specific_destinations": [
+        1,
+        2,
+        0
+      ],
+      "zero_history_uniform_row": [
+        0,
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "name": "Eq16_squared_loss_and_OD_finite_difference",
+      "status": "passed",
+      "expected_loss": 9,
+      "actual_loss": 9.0,
+      "expected_gradient": [
+        [
+          -6,
+          0
+        ],
+        [
+          4,
+          1
+        ],
+        [
+          0,
+          -3
+        ]
+      ],
+      "finite_difference_gradient": [
+        [
+          -5.999999999772853,
+          -8.881784197001251e-11
+        ],
+        [
+          3.9999999998485687,
+          0.9999999999621422
+        ],
+        [
+          0.0,
+          -3.000000000596969
+        ]
+      ],
+      "autograd_test": "not_run; numeric reference only",
+      "squared_cancellation_counterexample": 2
+    },
+    {
+      "name": "declared_minibatch_estimators",
+      "status": "passed",
+      "full_objectives": [
+        2.5,
+        30
+      ],
+      "expected_uniform_subset_estimators": [
+        2.5,
+        30.0
+      ],
+      "full_partition_accumulation": [
+        2.5,
+        30
+      ],
+      "subset_count": 6,
+      "policy": "explicit reconstruction choices; not recovered historical optimizer behavior"
+    },
+    {
+      "name": "Eq17_formula_indices",
+      "status": "passed",
+      "epsilon": [
+        0,
+        9,
+        10,
+        11
+      ],
+      "weights": [
+        0.0264,
+        0.0026399999999999996,
+        0.0,
+        0.0
+      ],
+      "epoch_index_mapping": "must be declared separately"
+    },
+    {
+      "name": "horizon_first_metrics",
+      "status": "passed",
+      "per_horizon": [
+        [
+          0.5,
+          0.7071067811865476,
+          50.0
+        ],
+        [
+          3.5,
+          3.5355339059327378,
+          175.0
+        ]
+      ],
+      "mean_horizons": [
+        2.0,
+        2.121320343559643,
+        112.5
+      ],
+      "pooled_counterexample": [
+        2.0,
+        2.5495097567963922,
+        133.33333333333334
+      ],
+      "wmape_unit": "percent"
+    },
+    {
+      "name": "sample_ID_join_and_final_partial_batch",
+      "status": "passed",
+      "shuffled_ids": [
+        "c",
+        "a",
+        "b"
+      ],
+      "paired_truth": [
+        2.0,
+        1.0,
+        3.0
+      ],
+      "batch_sizes": [
+        2,
+        1
+      ],
+      "missing_sample_detected": true,
+      "scope": "reference join, not execution of DataLoader pseudocode"
+    },
+    {
+      "name": "cutoff_finished_unfinished_conservation",
+      "status": "passed",
+      "actual_cohort": 3,
+      "finished": [
+        0,
+        1,
+        0
+      ],
+      "unfinished": 2,
+      "delayed_exit_destinations": "not available in encoder inputs at cutoff",
+      "fixture_assumption": "event available at its timestamp; ingestion-delay policy requires separate metadata"
+    },
+    {
+      "name": "service_frequency_unit_conversion",
+      "status": "passed",
+      "headway_minutes": 5,
+      "frequency_per_hour": 12.0,
+      "interval_minutes": 15,
+      "departures_per_interval": 3.0,
+      "storage_unit": "declared reconstruction convention"
+    }
+  ]
+}

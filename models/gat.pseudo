@@ -1,0 +1,211 @@
+MODULE models.gat
+PURPOSE Multihead graph attention with optional edge features.
+PAPER Section 4.8, Eq. (31); scoring and sparse-storage options are supplied parameters.
+INPUT x[N,I] or (x_source[N_src,I_src], optional x_target[N_dst,I_dst]).
+INPUT Directed edges, optional edge_attr[E,D_edge], optional target size.
+OUTPUT Features[N_dst,H*C] for concatenation or [N_dst,C] for mean heads.
+PARAMETERS Node projections, attention vectors, optional edge projection and output bias.
+
+CLASS GATConv
+    STATE Head count H, per-head width C, self-loop policy and attention dropout.
+    ATTENTION Normalize incoming edges separately for every destination and head.
+    RETURN_MODE absent request returns features; either Boolean value returns attention as well.
+END CLASS
+
+PROCEDURE GATConv.__init__(in_channels, out_channels, heads=1, concat=true,
+    negative_slope=0.2, dropout=0, add_self_loops=true, edge_dim=absent,
+    fill_value=mean, bias=true, extra_options=absent)
+    H,C <- heads,out_channels.
+    STORE in_channels,concat,negative_slope,dropout,add_self_loops,edge_dim,fill_value,extra_options.
+    D_edge <- edge_dim.
+    IF H<=0 OR C<=0 OR dropout<0 OR dropout>=1: RAISE Error(invalid_attention_dimensions_or_dropout).
+    shared_projection,source_projection,target_projection <- absent.
+    IF in_channels is one integer I:
+        shared_projection <- REGISTER empty[H*C,I].
+    ELSE:
+        I_src,I_dst <- in_channels.
+        source_projection <- REGISTER empty[H*C,I_src].
+        target_projection <- REGISTER empty[H*C,I_dst].
+    END IF.
+    attention_source,attention_target <- REGISTER empty[H,C],empty[H,C].
+    edge_projection,attention_edge <- absent.
+    IF edge_dim is present:
+        edge_projection <- REGISTER empty[H*C,edge_dim].
+        attention_edge <- REGISTER empty[H,C].
+    END IF.
+    output_bias <- REGISTER empty[H*C if concat, otherwise C] if bias, otherwise absent.
+    reset_parameters().
+    RETURN this operator.
+END PROCEDURE
+
+PROCEDURE GATConv.reset_parameters()
+    FOR parameter in node projections, edge projection and attention vectors that are present:
+        INITIALIZE parameter with GLOROT and the configured random stream.
+    END FOR.
+    IF output_bias is present: output_bias <- zeros at its existing shape.
+    CLEAR propagation caches tied to old shapes.
+    RETURN this initialized parameter state.
+END PROCEDURE
+
+PROCEDURE GATConv.forward OVERLOAD_1
+    INPUT x, edge_index, optional edge_attr, optional size, return_attention_weights=absent.
+    RETURN FORWARD_IMPLEMENTATION(x,edge_index,edge_attr,size,absent).
+END PROCEDURE
+
+PROCEDURE GATConv.forward OVERLOAD_2
+    INPUT x, tensor edge_index, optional edge_attr, optional size, Boolean return_attention_weights.
+    RETURN FORWARD_IMPLEMENTATION(x,edge_index,edge_attr,size,return_attention_weights).
+END PROCEDURE
+
+PROCEDURE GATConv.forward OVERLOAD_3
+    INPUT x, library sparse adjacency, optional edge_attr, optional size, Boolean return_attention_weights.
+    RETURN FORWARD_IMPLEMENTATION(x,edge_index,edge_attr,size,return_attention_weights).
+END PROCEDURE
+
+PROCEDURE GATConv.forward FORWARD_IMPLEMENTATION
+    INPUT x, edge_index, edge_attr=absent, size=absent, return_attention_weights=absent.
+    IF x is one matrix:
+        raw_source,raw_target <- x,x.
+    ELSE:
+        raw_source,raw_target <- x.source,x.target.
+    END IF.
+    N_src <- number of raw_source rows; N_dst <- number of raw_target rows when present.
+    IF shared_projection is present:
+        x_src <- RESHAPE(raw_source*TRANSPOSE(shared_projection),[N_src,H,C]).
+        x_dst <- RESHAPE(raw_target*TRANSPOSE(shared_projection),[N_dst,H,C]) if raw_target is present,
+            otherwise absent.
+    ELSE:
+        x_src <- RESHAPE(raw_source*TRANSPOSE(source_projection),[N_src,H,C]).
+        x_dst <- RESHAPE(raw_target*TRANSPOSE(target_projection),[N_dst,H,C]) if raw_target is present,
+            otherwise absent.
+    END IF.
+    N_src <- number of source rows.
+    N_dst <- target row count, otherwise size.destination or sparse shape's destination count.
+    IF N_dst is unresolved: RAISE Error(missing_target_node_count).
+    orientation <- extra_options.sparse_orientation if supplied, otherwise absent.
+    edges,attributes,storage <- canonical_edges(edge_index,edge_attr,orientation).
+    CHECK edge endpoints, feature widths and attribute row counts against N_src,N_dst.
+    alpha_source[j,k] <- DOT(x_src[j,k,:],attention_source[k,:]) for all source nodes and heads.
+    alpha_target <- absent.
+    IF x_dst is present:
+        alpha_target[i,k] <- DOT(x_dst[i,k,:],attention_target[k,:]) for all target nodes and heads.
+    END IF.
+    IF add_self_loops:
+        IF storage.kind=library_sparse AND edge attributes/projection are present:
+            RAISE Error(sparse_edge_features_need_coordinate_adapter).
+        END IF.
+        surviving <- all nonself edges, with matching attribute rows.
+        edges,attributes <- COPY(surviving.edges),COPY(surviving.attributes).
+        loop_count <- MIN(N_src,N_dst and any explicit size bounds).
+        FOR node=0..loop_count-1:
+            APPEND node->node to edges.
+            IF attributes are present:
+                APPEND self_loop_attribute(node,surviving.edges,surviving.attributes,fill_value) to attributes.
+            END IF.
+        END FOR.
+    END IF.
+    E <- length(edges).
+    source_logits <- alpha_source[edges.source,:].
+    target_logits <- alpha_target[edges.destination,:] if present, otherwise absent.
+    ptr <- destination segment pointers only when edges are sorted by destination; otherwise absent.
+    weights <- edge_update(source_logits,target_logits,attributes,edges.destination,ptr,N_dst).
+    accumulated <- zeros[N_dst,H,C].
+    FOR e=0..E-1:
+        accumulated[edges.destination[e],:,:] <-
+            accumulated[edges.destination[e],:,:]+message(x_src[edges.source[e]],weights[e]).
+    END FOR.
+    out <- RESHAPE(accumulated,[N_dst,H*C]) if concat, otherwise MEAN(accumulated,head_axis).
+    IF output_bias is present: out <- out+output_bias.
+    IF return_attention_weights is absent: RETURN out.
+    IF storage.kind=indexed:
+        RETURN out,(edges,weights).
+    ELSE IF storage.kind=native_sparse:
+        attention_adjacency <- RESTORE_SPARSE(storage,edges,values=weights).
+        RETURN out,(attention_adjacency,weights).
+    ELSE:
+        RETURN out,RESTORE_SPARSE(storage,edges,values=weights).
+    END IF.
+END PROCEDURE
+
+PROCEDURE canonical_edges(adjacency, edge_attributes, sparse_orientation)
+    IF adjacency is an indexed list:
+        edges <- {source:adjacency[0,:],destination:adjacency[1,:]}.
+        storage <- {kind:indexed}.
+    ELSE:
+        rows,columns,values,shape <- adjacency's stored COO view.
+        orientation <- adjacency's declared orientation or sparse_orientation.
+        IF orientation=destination_by_source:
+            edges <- {source:columns,destination:rows}.
+        ELSE IF orientation=source_by_destination:
+            edges <- {source:rows,destination:columns}.
+        ELSE:
+            RAISE Error(missing_sparse_orientation).
+        END IF.
+        storage <- {kind:adjacency.native_or_library_type,shape,orientation,coordinate_order}.
+    END IF.
+    attributes <- edge_attributes aligned to that same COO/indexed order.
+    RETURN edges,attributes,storage.
+END PROCEDURE
+
+PROCEDURE GATConv.edge_update(alpha_j, alpha_i, edge_attr, index, ptr, dim_size)
+    INPUT Edge logits[E,H]; index[E] identifies the destination of each edge.
+    logits <- alpha_j if alpha_i is absent, otherwise alpha_j+alpha_i.
+    IF E=0: RETURN empty[0,H].
+    IF edge_attr is present AND edge_projection is present:
+        edge_values <- RESHAPE(edge_attr,[E,D_edge]).
+        projected <- RESHAPE(edge_values*TRANSPOSE(edge_projection),[E,H,C]).
+        logits[e,k] <- logits[e,k]+DOT(projected[e,k,:],attention_edge[k,:]) for each e,k.
+    END IF.
+    activated <- MAX(logits,0)+negative_slope*MIN(logits,0).
+    attention <- zeros[E,H].
+    FOR destination=0..dim_size-1:
+        incoming <- positions e where index[e]=destination.
+        IF incoming is empty: CONTINUE.
+        FOR head=0..H-1:
+            maximum <- MAX(activated[incoming,head]).
+            denominator <- SUM(EXP(activated[incoming,head]-maximum)).
+            attention[incoming,head] <- EXP(activated[incoming,head]-maximum)/denominator.
+        END FOR.
+    END FOR.
+    IF training_mode AND dropout>0:
+        attention <- BERNOULLI(1-dropout,SHAPE(attention))*attention/(1-dropout).
+    END IF.
+    RETURN attention.
+END PROCEDURE
+
+PROCEDURE GATConv.message(x_j, alpha)
+    INPUT x_j[H,C] for one edge or [E,H,C] for gathered edges.
+    RETURN x_j * alpha with a singleton final feature axis.
+END PROCEDURE
+
+PROCEDURE GATConv.__repr__()
+    RETURN FORMAT("GATConv",in_channels,C,H,concat).
+END PROCEDURE
+
+PROCEDURE GATConv.self_loop_attribute(node, surviving_edges, attributes, fill_value)
+    IF fill_value is a scalar: RETURN REPEAT(fill_value,D_edge).
+    IF fill_value is a vector: RETURN COPY(fill_value).
+    incoming <- attributes for surviving edges with destination=node.
+    IF incoming is empty:
+        IF fill_value=add: RETURN zeros[D_edge].
+        IF fill_value=multiply: RETURN ones[D_edge].
+        IF extra_options.empty_reduction_value is absent:
+            RAISE Error(missing_parameter,empty_reduction_value).
+        END IF.
+        RETURN extra_options.empty_reduction_value for mean/min/max.
+    END IF.
+    RETURN the selected add/mean/min/max/multiply reduction of incoming by feature.
+END PROCEDURE
+
+PROCEDURE GATConv.verify_sparse_dense_equivalence(test_graph)
+    INPUT A runnable implementation, matched indexed/sparse graphs and a numerical tolerance.
+    SET dropout inactive and copy the same parameters/attributes to both runs.
+    indexed <- forward(test_graph.features,test_graph.indexed_view,test_graph.edge_attributes,
+        test_graph.size,return_attention_weights=true).
+    sparse <- forward(test_graph.features,test_graph.sparse_view,test_graph.edge_attributes,
+        test_graph.size,return_attention_weights=true).
+    COMPARE node outputs and attention after mapping edges to the same directed coordinates.
+    REPEAT for isolated nodes, unequal bipartite sizes, absent attributes and the selected duplicate-edge policy.
+    RETURN observed comparison results.
+END PROCEDURE
+END MODULE

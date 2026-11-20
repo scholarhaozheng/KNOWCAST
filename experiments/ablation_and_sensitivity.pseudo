@@ -1,0 +1,414 @@
+MODULE experiments.ablation_and_sensitivity
+PURPOSE Compare KNOWCAST components, learners, convergence, runtime and task settings.
+PAPER Sections 5.1.4-5.6; Tables 2-7.
+CONTRACT specs/interface_contracts.md; specs/implementation_parameters.md
+
+COMPONENTS
+    C1  finished OD, three unfinished allocations and destination compression
+    C2  generation loss                         Eqs. (15)-(19)
+    C3  distribution embedding                  Eq. (20)
+    C4  path utility and Logit                  Eqs. (21)-(23)
+    C51 section-probability embedding           Eqs. (24)-(25)
+    C52 line-frequency embedding               Eqs. (26)-(27)
+
+PROCEDURE define_ablation_cases(selected_ids)
+    OUTPUT case records keyed by the paper's case ID.
+    columns <- [learner,C1,C2,C3,C4,C51,C52,generation_covariates,generic_MLP]
+    cases <- {
+        "2":  [GATRU,    true,true, true, trainable,true, true, full,          false],
+        "2b": [GATRU,    true,false,true, trainable,true, true, full,          false],
+        "2c": [GATRU,    true,true, true, trainable,true, true, temporal_only, false],
+        "3":  [GATRU,    true,false,false,absent,   false,false,unused,        false],
+        "3b": [GATRU,    true,false,false,absent,   false,false,raw_exogenous, true ],
+        "4":  [GATRU,    true,true, false,absent,   false,false,full,          false],
+        "5":  [GATRU,    true,false,true, absent,   false,false,full,          false],
+        "6":  [GATRU,    true,false,false,absent,   false,true, unused,        false],
+        "7":  [GATRU,    true,false,false,fixed,    true, false,unused,        false],
+        "8":  [GATRU,    true,false,false,trainable,true, false,unused,        false],
+        "9":  [GConvLSTM,true,false,false,absent,   false,false,unused,        false],
+        "10": [GConvLSTM,true,true, false,absent,   false,false,full,          false],
+        "11": [GConvLSTM,true,false,true, absent,   false,false,full,          false],
+        "12": [GConvLSTM,true,false,false,absent,   false,true, unused,        false],
+        "13": [GConvLSTM,true,false,false,fixed,    true, false,unused,        false]
+    }
+    selected <- {}
+    FOR id IN selected_ids:
+        row <- RECORD(columns,cases[id])
+        row.id <- id
+        row.paper_source <- Table_3 if id="2" else Table_4
+        selected[id] <- row
+    END FOR
+    RETURN selected
+END PROCEDURE
+
+PROCEDURE materialize_case_dependencies(case, preprocessing, base_cfg, artifacts)
+    OUTPUT ExperimentEntry {id, cfg, target, search_space, dependencies, active_parameters, missing}.
+    cfg <- DEEP_COPY(base_cfg)
+    cfg.case_id <- case.id
+    cfg.fixed_inputs <- preprocessing.identities
+    cfg.target <- {R:preprocessing.R, K:preprocessing.R+1,
+                   RDS_id:preprocessing.RDS_id, split_ids:preprocessing.split_ids}
+    flags <- {generation_guidance:case.C2,trip_distribution:case.C3,
+              traffic_assignment:case.C51,depart_freq:case.C52,
+              history_distribution:case.C1,path_outputs:case.C4!=absent,
+              generic_exogenous_enabled:case.generic_MLP}
+    cfg.component_switches <- flags
+    cfg.domain_knowledge <- MERGE(cfg.domain_knowledge,flags)
+    cfg.resolved_component_context <- absent
+    cfg.model.learner <- case.learner
+    dependencies <- [finished_OD, day_allocation, week_allocation, month_allocation]
+    active_parameters <- [learner, C1_cells, fusion, readout]
+
+    # Generation consumers share the selected feature profile.
+    IF case.C2 OR case.C3:
+        profile <- case.generation_covariates
+        cfg.domain_knowledge.generation_covariates <- profile
+        cfg.auxiliary_feature_argument.generation_covariate_profile <- profile
+        dependencies += [production_estimator(profile), attraction_estimator(profile)]
+        IF profile=temporal_only:
+            cfg.generation_inputs <- [Wknd,TOD,Season,Event]
+            cfg.profile_policy <- shared_temporal_profile
+        ELSE:
+            cfg.generation_inputs <- [PopAct,AgePct_work,EduPct,HHSize,Wknd,TOD,Season,Event]
+        END IF
+        MATCH feature, scaler and checkpoint profile identities for every generation consumer
+    END IF
+    cfg.generation_loss.enabled <- case.C2
+    IF NOT case.C2:
+        cfg.generation_loss.weight <- 0
+    END IF
+    IF case.C3:
+        dependencies += [frozen_zeta, dynamic_impedance, distribution_AE]
+        active_parameters += [distribution_encoder]
+    END IF
+
+    # Path feasibility uses raw service even when C52 is disabled.
+    IF case.C4 != absent:
+        dependencies += [candidate_routes, exact_incidence, raw_service]
+        cfg.utility.initial_values <- base_cfg.utility.initial_values
+        cfg.utility.trainable <- (case.C4=trainable)
+        IF cfg.utility.trainable:
+            active_parameters += [utility_coefficients]
+        END IF
+    END IF
+    IF case.C51:
+        dependencies += [path_AE_with_pretraining_utility_state]
+        active_parameters += [path_encoder]
+    END IF
+    IF case.C52:
+        dependencies += [raw_service, frequency_transform, frequency_AE]
+        active_parameters += [frequency_encoder]
+    END IF
+    IF case.generic_MLP:
+        generic <- build_generic_exogenous_adapter(
+            base_cfg.generic_input_schema,base_cfg.generic_encoder_spec)
+        IF generic is Pending:
+            RETURN {id:case.id,missing:generic.missing,status:pending}
+        END IF
+        cfg.generic_exogenous_contract <- generic
+        dependencies += generic.input_schema.raw_dependencies
+        active_parameters += [generic_encoder]
+    END IF
+
+    cfg.model.feature_layouts <- COMPOSE_LAYOUT(case,preprocessing,base_cfg.embedding_widths)
+    cfg.model.recurrent.learner <- case.learner
+    resolution <- artifacts.resolve(UNIQUE(dependencies),cfg)
+    cfg.artifacts <- resolution.registry
+    missing <- resolution.missing
+    IF case.learner=GConvLSTM AND artifacts.learner_factories.GConvLSTM is absent:
+        missing += ["GConvLSTM forecast adapter"]
+    END IF
+    model_factory <- FUNCTION(selected_cfg):
+        selected_cfg.model.feature_layouts <- COMPOSE_LAYOUT(case,preprocessing,selected_cfg.embedding_widths)
+        RETURN build_learner_adapter(case.learner,selected_cfg.model.feature_layouts,
+            preprocessing.topology,selected_cfg,artifacts.learner_factories)
+    END FUNCTION
+    RETURN {id:case.id,cfg:cfg,target:cfg.target,search_space:cfg.search_space,
+            model_factory:model_factory,dependencies:dependencies,
+            active_parameters:active_parameters,missing:missing}
+END PROCEDURE
+
+PROCEDURE build_learner_adapter(name, feature_layout, topology, architecture, factories)
+    OUTPUT complete forecast adapter with forward, registered_parameters and checkpoint_contract.
+    INPUT factories.GATRU constructs Net_0207; other factories construct complete forecast adapters.
+    IF name=GATRU:
+        learner <- factories.GATRU(architecture,feature_layout,topology)
+        learner.state_layout <- hidden[B,N,h]
+    ELSE IF name=GConvLSTM:
+        IF factories.GConvLSTM is absent:
+            RETURN Pending(["GConvLSTM factory"])
+        END IF
+        learner <- factories.GConvLSTM(architecture,feature_layout,topology)
+        learner.state_layout <- {hidden[B,N,h], cell[B,N,h]}
+        MATCH learner.encoder_to_decoder with architecture.model.learner_contract.state_transfer
+        MATCH learner.C1_state_fusion with architecture.model.learner_contract.hidden_and_cell_fusion
+    ELSE:
+        IF factories[name] is absent:
+            RETURN Pending([name+" forecast adapter"])
+        END IF
+        learner <- factories[name](architecture,feature_layout,topology)
+    END IF
+    ASSERT learner.input_layout agrees with feature_layout
+    ASSERT learner.forward accepts BatchBundle and returns ForecastBundle with OD[B,L_f,N,K]
+    ASSERT learner preserves active knowledge, generation-target and assignment-context outputs
+    REGISTER learner parameters once
+    RETURN learner
+END PROCEDURE
+
+PROCEDURE build_generic_exogenous_adapter(input_schema, encoder_spec)
+    OUTPUT a configuration record consumed once by the Net constructor.
+    required <- [input_schema.feature_order, input_schema.raw_dependencies,
+                 input_schema.station_alignment, input_schema.missingness_rule,
+                 encoder_spec.input_dim, encoder_spec.widths, encoder_spec.activations,
+                 encoder_spec.dropout, encoder_spec.input_transform]
+    IF any required field is absent:
+        RETURN Pending(NAMES_OF_MISSING(required))
+    END IF
+    depth <- LENGTH(encoder_spec.widths)
+    ASSERT depth > 0
+    ASSERT LENGTH(encoder_spec.activations)=depth AND LENGTH(encoder_spec.dropout)=depth
+    ASSERT every width > 0 AND every dropout value is in [0,1)
+    encoder_spec.output_dim <- LAST(encoder_spec.widths)
+    encoder_spec.feature_schema <- input_schema.feature_order
+    ASSERT encoder_spec.input_dim = input_schema.flattened_station_width
+    ASSERT encoder_spec.input_transform.fit_split = train
+
+    RETURN {
+        input_schema: input_schema,
+        encoder_spec: encoder_spec,
+        factory: models.Net_0207.build_generic_encoder,
+        output_field: generic_exogenous_by_origin
+    }
+    # Net constructs this encoder once and joins its [N,F_mlp] output to the C1 features.
+END PROCEDURE
+
+PROCEDURE register_external_baselines(supplied_adapters, comparison_target)
+    OUTPUT registry keyed by benchmark name.
+    names <- [LSTM,DCRNN,GConvGRU,GConvLSTM,GCLSTM,LRGCN,TGCN,A3T_GCN,AGCRN,STConv]
+    registry <- {}
+    FOR name IN names:
+        adapter <- supplied_adapters.get(name)
+        IF adapter is absent:
+            registry[name] <- {id:name,missing:[name+" forecasting adapter"],status:pending}
+            CONTINUE
+        END IF
+        MATCH adapter.target_manifest with comparison_target
+        REQUIRE adapter has cfg, model_factory, train, predict, state_export and search_space
+        registry[name] <- {
+            id:name, cfg:adapter.cfg, target:comparison_target, missing:[],
+            model_factory:adapter.model_factory,
+            adapter:adapter, status:ready, architecture:adapter.architecture,
+            readout:adapter.readout, preprocessing:adapter.preprocessing,
+            search_space:adapter.search_space
+        }
+    END FOR
+    # LSTM uses temporal inputs; each graph baseline supplies its own graph/readout operator.
+    RETURN registry
+END PROCEDURE
+
+PROCEDURE run_controlled_comparison(entries, dependencies, protocol)
+    INPUT entries are case plans or baseline adapters with a common target manifest.
+    OUTPUT per-run records, selected-checkpoint exports and comparison tables.
+    results <- []
+    FOR entry IN entries:
+        IF entry.missing is nonempty:
+            APPEND {entry:entry.id,status:pending,missing:entry.missing} TO results
+            CONTINUE
+        END IF
+        MATCH entry.target with protocol.comparison_target
+        dependencies.verify(entry.dependencies if present else entry.preprocessing)
+        FOR seed IN protocol.seeds:
+            run <- protocol.create_run(entry.id,seed)
+            run.environment <- protocol.environment
+            run.preprocessing <- protocol.preprocessing_ids
+            cfg <- DEEP_COPY(entry.cfg)
+            cfg.seed <- seed
+
+            # Search and selection use validation MAE.
+            search <- protocol.search_runner(
+                entry,cfg,entry.search_space,protocol.search_budget,run.search_directory,
+                model_factory=entry.model_factory)
+            selected_cfg <- search.best_complete_configuration
+            IF selected_cfg is absent:
+                APPEND {entry:entry.id,seed:seed,status:search_failed} TO results
+                CONTINUE
+            END IF
+            training <- protocol.training_runner(
+                entry,selected_cfg,run.training_directory,allow_test_evaluation=false,
+                model_factory=entry.model_factory)
+            checkpoint <- training.best_checkpoint
+            IF checkpoint is absent:
+                APPEND {entry:entry.id,seed:seed,status:training_failed} TO results
+                CONTINUE
+            END IF
+            protocol.freeze_selection(checkpoint,selected_cfg)
+
+            evaluation <- protocol.evaluation_runner(entry,checkpoint,split=test,
+                return_predictions=true,model_factory=entry.model_factory)
+            MATCH evaluation.sample_ids, ytime, RDS_id with protocol.test_target
+            record <- {entry:entry.id,seed:seed,checkpoint:checkpoint,
+                       configuration:selected_cfg,training:training,
+                       evaluation:evaluation,status:complete,
+                       environment:run.environment,preprocessing:run.preprocessing}
+            IF protocol.long_tail.enabled:
+                segments <- train_evaluate_functions.BUILD_FLOW_SEGMENTS(
+                    evaluation.y_truth,evaluation.valid_mask,evaluation.sample_ids,
+                    evaluation.ytime,protocol.RDS,protocol.long_tail)
+                record.long_tail <- train_evaluate_functions.SEGMENTED_EVALUATION(
+                    evaluation.y_evaluated,evaluation.y_truth,evaluation.valid_mask,
+                    segments,protocol.RDS,protocol.metrics)
+            END IF
+            APPEND record TO results
+        END FOR
+    END FOR
+    measured <- SUMMARIZE_COMPLETED_RUNS(results,protocol.across_seed_summary)
+    RETURN {runs:results,measured:measured,paper_reference:protocol.paper_reference}
+END PROCEDURE
+
+PROCEDURE compare_early_training_trajectories(histories, protocol)
+    INPUT histories[id] contains exported epoch_history and utility_epochs tables.
+    OUTPUT epoch-30 rows, OD-loss curves and utility trajectories.
+    rows <- []
+    curves <- []
+    FOR id IN ["2","2b","2c"]:
+        history <- histories[id]
+        IF protocol.split=val:
+            record <- UNIQUE_MATCH(history.epoch_history,Epoch=30)
+            row <- {MAE:record.Val_MAE,RMSE:record.Val_RMSE,WMAPE:record.Val_WMAPE_percent}
+                if record exists else absent
+        ELSE:
+            row <- UNIQUE_MATCH(protocol.post_hoc_evaluations,case=id,Epoch=30,split=protocol.split)
+        END IF
+        IF row is absent:
+            APPEND {case:id,status:missing_epoch_30} TO rows
+        ELSE:
+            APPEND {case:id,MAE:row.MAE,RMSE:row.RMSE,WMAPE:row.WMAPE} TO rows
+        END IF
+        FOR record IN history.epoch_history:
+            weight <- record.generation_weight if id!="2b" else 0
+            APPEND {case:id,epoch:record.Epoch,epsilon:record.epsilon,
+                    od_loss:record.Train_OD_MAE,generation_weight:weight} TO curves
+        END FOR
+    END FOR
+    utility <- {id:histories[id].utility_epochs FOR id IN histories.keys}
+    IF protocol.breakpoints.enabled:
+        breaks <- protocol.breakpoints.detector(utility,protocol.breakpoints.settings)
+    ELSE:
+        breaks <- []
+    END IF
+    RETURN {epoch_30:rows,curves:curves,utility:utility,breakpoints:breaks}
+END PROCEDURE
+
+PROCEDURE benchmark_runtime(entries, hardware, timing_policy)
+    INPUT Cases 9,3,3b,2; a common batch layout; five consecutive measured epochs.
+    OUTPUT raw times and per-case seconds/epoch and milliseconds/batch.
+    ASSERT LENGTH(timing_policy.epochs)=5 AND CONSECUTIVE(timing_policy.epochs)
+    training_times <- []
+    forward_times <- []
+    FOR entry IN entries:
+        runner <- timing_policy.create_runner(entry,hardware)
+        runner.warm_up(timing_policy.warm_up)
+        FOR epoch IN timing_policy.epochs:
+            runner.set_training_mode()
+            SYNCHRONIZE hardware
+            start <- MONOTONIC_TIME()
+            train_record <- runner.training_epoch(epoch,timing_policy.training_boundary)
+            SYNCHRONIZE hardware
+            train_seconds <- MONOTONIC_TIME()-start
+            APPEND {case:entry.id,epoch:epoch,seconds:train_seconds} TO training_times
+
+            FOR batch IN runner.validation_batches():
+                runner.set_evaluation_mode()
+                SYNCHRONIZE hardware
+                start <- MONOTONIC_TIME()
+                WITH gradients_disabled:
+                    runner.forward(batch.inference_inputs)
+                END WITH
+                SYNCHRONIZE hardware
+                latency_ms <- 1000*(MONOTONIC_TIME()-start)
+                APPEND {case:entry.id,epoch:epoch,
+                        inference_ms:latency_ms,batch_rows:batch.genuine_count} TO forward_times
+            END FOR
+        END FOR
+    END FOR
+    # Training boundaries identify loading, validation, I/O and preparation costs explicitly.
+    summary <- {
+        seconds_per_epoch:MEAN_BY_CASE(training_times.seconds),
+        milliseconds_per_batch:AGGREGATE_BY_CASE(forward_times,timing_policy.inference_aggregation)
+    }
+    RETURN {training_times:training_times,forward_times:forward_times,
+            summary:summary,hardware:hardware,boundary:timing_policy}
+END PROCEDURE
+
+PROCEDURE evaluate_window_sensitivity(window_grid, base_case, protocol)
+    OUTPUT per-window, per-horizon metrics and the actual forecast-origin population.
+    # Paper examples: (L_h,L_f)=(2,4) and (4,12).
+    results <- []
+    FOR (L_h,L_f) IN window_grid:
+        ASSERT L_h>0 AND L_f>0
+        data <- protocol.rebuild_windows(L_h,L_f)
+        data.knowledge <- protocol.align_knowledge(data.timestamps,data.forecast_origins)
+        cfg <- protocol.configure_task(base_case,L_h,L_f,data)
+        cfg <- protocol.validation_tuning.apply(cfg,protocol.tuning_mode)
+        run <- protocol.fit_and_select(cfg,data.train,data.validation)
+        metrics <- protocol.evaluate(run.best_checkpoint,data.test,by_horizon=true)
+        APPEND {L_h:L_h,L_f:L_f,origins:data.test.sample_ids,
+                target_times:data.test.target_times,metrics:metrics} TO results
+    END FOR
+    IF protocol.comparison_population=common_origins:
+        common <- INTERSECTION(row.origins FOR row IN results)
+        results <- protocol.rescore_on_origins(results,common)
+    END IF
+    RETURN results
+END PROCEDURE
+
+PROCEDURE evaluate_retention_sensitivity(retained_counts, base_task, training_OD, protocol)
+    OUTPUT metrics with exact R, compressed width, flow share and target identity.
+    # Paper dimension-ratio examples: 0.15 and 0.80. Exact R is an input.
+    results <- []
+    FOR R IN retained_counts:
+        ASSERT 0<=R<base_task.N
+        mapping <- protocol.fit_destinations(training_OD,R)
+        shares <- protocol.fit_residual_shares(training_OD,mapping)
+        compressed <- protocol.compress_all_splits(mapping,shares)
+        transforms <- protocol.fit_transforms(compressed.train)
+        features <- protocol.prepare_features(compressed,transforms)
+        cfg <- protocol.configure_task(base_task,K=R+1,mapping=mapping,features=features)
+        cfg <- protocol.validation_tuning.apply(cfg,protocol.tuning_mode)
+        run <- protocol.fit_and_select(cfg,features.train,features.validation)
+        metrics <- protocol.evaluate(run.best_checkpoint,features.test,by_horizon=true)
+        APPEND {
+            R:R,K:R+1,RDS_id:mapping.id,compressed_width_ratio:(R+1)/base_task.N,
+            retained_destination_ratio:R/base_task.N,
+            retained_flow_share:protocol.retained_share(training_OD,mapping),
+            sparsity:protocol.target_sparsity(compressed),metrics:metrics
+        } TO results
+    END FOR
+    IF protocol.common_full_target_evaluation.enabled:
+        full_target_comparison <- protocol.common_full_target_evaluation.apply(results)
+    ELSE:
+        full_target_comparison <- absent
+    END IF
+    RETURN {changed_target_results:results,common_full_target:full_target_comparison}
+END PROCEDURE
+
+PROCEDURE export_experiment_manifest(cases, baselines, runs, diagnostics, sensitivity, output)
+    OUTPUT receipt with table and figure paths.
+    manifest <- {
+        cases:cases,baseline_status:{id:entry.status FOR (id,entry) IN baselines},
+        runs:[{entry:r.entry,seed:r.get(seed,absent),status:r.status} FOR r IN runs.runs],
+        selection:[r.checkpoint FOR r IN runs.runs WHERE r.status=complete],
+        parameters:[r.configuration FOR r IN runs.runs WHERE r.status=complete],
+        information:[{entry:r.entry,seed:r.seed,environment:r.environment,
+                      preprocessing:r.preprocessing} FOR r IN runs.runs WHERE r.status=complete],
+        diagnostics:diagnostics,sensitivity:sensitivity
+    }
+    WRITE manifest TO output.manifest
+    WRITE runs.measured TO output.measured_table
+    WRITE runs.paper_reference TO output.reference_table
+    FOR figure IN output.figures:
+        figure.attach_source_rows()
+        figure.save()
+    END FOR
+    RETURN {manifest:output.manifest,tables:output.tables,figures:output.figures}
+END PROCEDURE

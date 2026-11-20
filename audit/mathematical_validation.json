@@ -1,0 +1,34 @@
+{
+  "evidence_kind": "independent_formula_reference_calculations",
+  "numerical_groups_passed": 24,
+  "static_parameter_contract_groups": 1,
+  "execution_environment": "Python standard library",
+  "executed_pseudocode": false,
+  "trained_model": false,
+  "groups": {
+    "model": {
+      "passed": 6,
+      "result_file": "model-math-results.json",
+      "script": "reference_checks/check_model_math.py",
+      "script_sha256": "43fb104f9015ae9b34ffe72ffb2eda9269b18abe09819f3011393f87576287d8"
+    },
+    "data_training": {
+      "passed": 9,
+      "result_file": "data-training-math-results.json",
+      "script": "reference_checks/check_data_training_math.py",
+      "script_sha256": "65a0c5e1baf0085e3797854bfbe5fe680ae29b6e1d91d4fe06ca76fa8b72ec8d"
+    },
+    "review_contracts": {
+      "passed": 4,
+      "result_file": "review-contract-results.json",
+      "script": "reference_checks/check_review_contracts.py",
+      "script_sha256": "971ff360729ea0a158b6170d9b778428e9dd0513bb0dddc01294ab7447885de4"
+    },
+    "temporal_kernel": {
+      "passed": 5,
+      "result_file": "temporal-kernel-results.json",
+      "script": "reference_checks/check_temporal_kernel.py",
+      "script_sha256": "49095f9e9d02d841b24cf5c5652681a58284485cb6ace97b1f1f5ec2d0ded6b5"
+    }
+  }
+}

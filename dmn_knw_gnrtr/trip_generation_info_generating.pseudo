@@ -1,0 +1,342 @@
+MODULE trip_generation_info_generating
+PURPOSE Station-district reconciliation, census cleaning, raster population extraction, feature fusion.
+PAPER Section 4.3.1 Equation (14); Section 5.1.2.
+
+INPUT ARTIFACTS
+    STATION_CSV_PATH: station coordinate table, legacy result_API_modified.csv.
+    STATION_MAP_CSV: station/district table, legacy suzhou_subway_station.csv.
+    RASTER_POP_PATH: population raster, legacy suzhou_population_clipped.tif.
+    PATH_AGE: age census table, legacy 02-02.csv.
+    PATH_EDU: education table, legacy educated_level.csv.
+    PATH_HOUSE: household table, legacy 02-06.csv.
+    PATH_EMP: optional employment diagnostics, legacy 02-09.csv.
+    OUTPUT_ARTIFACT: legacy station_static_features_REAL.pkl name with revised schema metadata.
+    coordinate_contract: longitude/latitude convention and original CRS.
+    raster_contract: CRS, nodata value, band, units, spatial resolution, census vintage.
+    district_aliases: reviewed cross-source district name table.
+    feature_contract: units, denominators, missingness policy, and station order.
+
+PROCEDURE clean_numeric
+    INPUT value: table cell.
+    OUTPUT finite numeric value or explicit MISSING.
+    IF value is already missing:
+        RETURN MISSING.
+    END IF
+    CONVERT value to a trimmed textual representation when necessary.
+    IF empty or equal to the table's missing marker such as a dash:
+        RETURN MISSING.
+    END IF
+    REMOVE documented thousands separators and surrounding whitespace.
+    IDENTIFY unit suffixes from the schema before conversion.
+    REMOVE only recognized unit text.
+    RETAIN the numerical sign and decimal separator.
+    IF scientific notation is present:
+        PARSE it under the declared table format.
+    END IF
+    IF the cleaned token is not a valid number:
+        RETURN MISSING with a parse diagnostic.
+    END IF
+    CONVERT the token to numeric form.
+    IF not finite:
+        RETURN MISSING.
+    END IF
+    RETURN the value without applying undocumented unit conversions.
+END PROCEDURE
+
+PROCEDURE load_automated_map
+    INPUT map_csv_path, corrections.
+    OUTPUT station_to_district map and reconciliation diagnostics.
+    READ the table using the declared encoding and header row.
+    LEGACY FILE FORMAT: GBK text with the second row as header.
+    REQUIRE columns 中文站名 and 所在地.
+    IF either column is absent:
+        REPORT actual column names and stop this load.
+        RETURN failure, not an empty successful station mapping.
+    END IF
+    TRIM station and district names.
+    CLASSIFY rows with missing station names or district names as invalid.
+    RECORD invalid row counts.
+    APPLY corrections to the district column.
+    GROUP valid rows by station name.
+    FOR EACH station name:
+        COLLECT its distinct normalized district values.
+        IF exactly one value exists:
+            STORE that district.
+        ELSE:
+            REPORT a conflicting station-to-district assignment.
+            REQUIRE an explicit geographic reconciliation.
+        END IF
+    END FOR
+    VERIFY every stored district name is nonempty.
+    REPORT number of valid station mappings and unresolved conflicts.
+    RETURN map and diagnostics.
+    ON file absence, decoding error, or parse error:
+        REPORT source path and error category without raw personal data.
+        RETURN failure.
+END PROCEDURE
+
+PROCEDURE load_station_data_from_csv
+    INPUT csv_path.
+    OUTPUT coords_db, ordered station identifiers, diagnostics.
+    READ coordinate table under its declared encoding.
+    LEGACY FILE FORMAT: UTF-8 with optional byte-order mark.
+    REQUIRE columns station_name, lng, lat.
+    INITIALIZE empty coordinate mapping.
+    INITIALIZE stable station list.
+    FOR EACH table row:
+        station <- trimmed station_name.
+        longitude <- clean_numeric(lng).
+        latitude <- clean_numeric(lat).
+        IF station or either coordinate is missing:
+            RECORD an invalid coordinate row.
+            CONTINUE under the declared missing-row policy.
+        END IF
+        CHECK coordinates lie within the declared CRS domain.
+        IF coordinates are WGS84 longitude/latitude:
+            REQUIRE longitude in [-180,180].
+            REQUIRE latitude in [-90,90].
+        END IF
+        IF station already has a different coordinate:
+            REQUIRE duplicate-station reconciliation.
+        ELSE IF station is new:
+            STORE coordinate pair.
+            APPEND station once to the station list.
+        END IF
+    END FOR
+    VALIDATE coordinate names against the network station registry.
+    RETURN coords_db, station list, diagnostics.
+    ON load failure:
+        RETURN a failure status with empty payloads.
+END PROCEDURE
+
+PROCEDURE get_population_from_raster
+    INPUT station_id, station_coords_db, raster_src, radius_m.
+    OUTPUT population estimate plus extraction validity and provenance.
+    PAPER SETTING: radius_m = 800 meters.
+    IF station_id has no validated coordinate:
+        RETURN MISSING_POPULATION with a missing-coordinate diagnostic.
+    END IF
+    READ longitude and latitude from the coordinate contract.
+    CREATE a point in the declared original CRS.
+    READ the raster CRS and require a valid spatial transform.
+    SELECT a documented metric or geodesic buffering method.
+    IMPLEMENTATION DECISION: local projected CRS and pixel-boundary weighting.
+    USE a CRS whose metric distance is valid at the study latitude.
+    TRANSFORM the point into the selected buffer coordinate system.
+    CONSTRUCT the circular 800-meter catchment.
+    TRANSFORM its geometry into the raster CRS.
+    CHECK whether the catchment intersects the raster bounds.
+    IF there is no coverage:
+        RETURN MISSING_POPULATION with an outside-coverage diagnostic.
+    END IF
+    SELECT the documented population band.
+    READ only the raster window intersecting the catchment.
+    APPLY the catchment mask and the declared pixel inclusion rule.
+    IDENTIFY raster nodata cells separately from zero-population cells.
+    COMPUTE the covered catchment area and missing coverage fraction.
+    IF coverage fails the declared completeness rule:
+        RETURN a flagged estimate or failure according to the contract.
+    END IF
+    INSPECT the population raster units.
+    IF values are counts per cell:
+        SUM valid counts with the declared boundary-cell weights.
+    ELSE IF values are persons per area:
+        MULTIPLY each density by its covered ground area.
+        SUM the resulting counts.
+    ELSE:
+        STOP until the population units are supplied.
+    END IF
+    CHECK estimate is finite and nonnegative.
+    RETURN population, coverage, CRS, radius, and raster-vintage metadata.
+    ON transform, masking, or I/O error:
+        RETURN failure with the affected station identifier and error category.
+END PROCEDURE
+
+PROCEDURE generate_station_level_socio_demographics
+    INPUT station_to_district_map, all_station_ids.
+    INPUT path_age, path_edu, path_house, path_emp.
+    INPUT raster_src, station_coords_db.
+    OUTPUT station feature table plus per-feature validity and provenance.
+    INITIALIZE separate census tables and a load-error collection.
+    READ age census table.
+    LEGACY AGE FORMAT: UTF-8 with byte-order mark, third row as header.
+    TRIM column names.
+    MAP 地    区 to district.
+    MAP Aged 0-14 to age_0_14.
+    MAP Aged 15-64 to age_15_64.
+    MAP Aged 65 and Over to age_65_plus.
+    MAP Resident Population to total_pop_age.
+    REQUIRE every mapped age column.
+    REMOVE the explicitly identified city-total row 全    市.
+    NORMALIZE district names using the shared alias table.
+    APPLY clean_numeric to every age count and total.
+    CHECK district keys are unique.
+    CHECK age counts and denominators have consistent population units.
+    READ education table.
+    LEGACY EDUCATION FORMAT: GBK, tab-separated, first row as header, quoted fields.
+    REQUIRE 地区 and four education columns.
+    MAP 地区 to district.
+    MAP 大学 to edu_tertiary.
+    MAP 高中 to edu_senHigh.
+    MAP 初中 to edu_junMid.
+    MAP 小学 to edu_primary.
+    REMOVE the explicit city-total row 苏州市.
+    NORMALIZE district names.
+    APPLY clean_numeric to the four education columns.
+    READ the table definition of each education number.
+    IF the table already reports shares or counts per fixed population:
+        CONVERT using that declared denominator.
+    ELSE IF it reports mutually exclusive population counts:
+        USE the matching stated census population denominator.
+    ELSE:
+        REQUIRE a documented denominator before producing paper features.
+    END IF
+    KEEP unavailable education categories marked MISSING.
+    IF a normalized four-reported-category profile is also retained:
+        LABEL it as a legacy diagnostic with a different denominator.
+    END IF
+    READ household table.
+    LEGACY HOUSEHOLD FORMAT: UTF-8 with byte-order mark, first row as header.
+    MAP 地    区 to district.
+    MAP the multi-line year-end total-households column to households.
+    RECOGNIZE the source heading Total ouseholds at Year-end as a spelling alias.
+    REMOVE the city-total row.
+    NORMALIZE district keys.
+    APPLY clean_numeric to households.
+    CHECK household counts refer to the same population definition and reference period.
+    IF resident population and household totals have incompatible universes:
+        MARK household-size derivation unresolved.
+    END IF
+    IF employment diagnostics are requested:
+        READ employment table.
+        LEGACY EMPLOYMENT FORMAT: UTF-8 with byte-order mark, first row as header.
+        MAP 地    区 to district.
+        MAP Employment Population (10000 persons) to emp_total.
+        MAP Primary Industry heading to emp_primary.
+        MAP Secondary Industry heading to emp_secondary.
+        MAP Tertiary Industry heading to emp_tertiary.
+        ACCEPT only reviewed spacing/newline heading aliases.
+        REQUIRE all requested employment columns.
+        REMOVE the city-total row.
+        NORMALIZE district names.
+        APPLY clean_numeric to all employment values.
+        CONVERT units of ten thousand persons to persons.
+    END IF
+    IF a required paper-feature census table cannot be read:
+        RETURN failure and the detailed missing-column or source diagnostic.
+    END IF
+    INITIALIZE output records.
+    INITIALIZE missing_districts as a set for deduplicated diagnostics.
+    FOR EACH station_id in canonical all_station_ids order:
+        INITIALIZE a feature record with station identity and missingness fields.
+        IF station_id has no district mapping:
+            RECORD missing district and retain the station in diagnostics.
+            APPLY the declared failure or imputation policy.
+
+            CONTINUE if a complete record cannot be produced.
+        END IF
+        district <- station_to_district_map[station_id].
+        FOR EACH required census table:
+            IF district is absent:
+                RECORD the specific missing source once per district.
+                MARK corresponding features missing.
+            END IF
+        END FOR
+        population_result <- get_population_from_raster(station_id, coordinates, raster, 800).
+        STORE canonical PopAct and its extraction status; expose PopAct_i only as an explicit alias.
+        READ the district age counts and population denominator.
+        IF denominator is valid and positive:
+            age_0_14_pct <- age_0_14 / total_pop_age.
+            age_15_64_pct <- age_15_64 / total_pop_age.
+            age_65_plus_pct <- age_65_plus / total_pop_age.
+            IF the declared working-age definition is 15-64:
+                SET canonical AgePct_work <- age_15_64_pct.
+            ELSE:
+                REQUIRE source counts matching the selected age bounds or mark AgePct_work unresolved.
+            END IF
+            RECORD that the paper does not identify exact working-age bounds from Eq.(14) alone.
+        ELSE:
+            MARK all derived age shares missing.
+        END IF
+        READ education values with their declared denominator.
+        COMPUTE edu_primary_pct using the primary-or-below definition when supported.
+        COMPUTE edu_junMid_pct using the junior-middle definition.
+        COMPUTE edu_senHigh_pct using the senior-high/technical-secondary definition.
+        COMPUTE edu_tertiary_pct using junior-college-or-above categories.
+        IF a source category cannot be mapped to the paper definition:
+            MARK the mismatch explicitly rather than relabeling it silently.
+        END IF
+        MAP validated edu_primary_pct,edu_junMid_pct,edu_senHigh_pct,edu_tertiary_pct
+            to canonical EduPct_primary,EduPct_junMid,EduPct_senHigh,EduPct_tertiary respectively.
+        PRESERVE unresolved category status through this mapping; aliases do not make missing values valid.
+        READ compatible household population and household count.
+        IF household count is positive and definitions match:
+            avg_household_size_i <- compatible_population / households.
+            SET canonical HHSize <- avg_household_size_i in persons per compatible household.
+        ELSE:
+            MARK household size missing.
+        END IF
+        APPLY the declared district-to-catchment allocation method.
+        IF using district-wide proportions uniformly within the station catchment:
+            LABEL this as an ecological estimation assumption.
+            STORE district share as the station estimate, not an individual measurement.
+        END IF
+        IF a catchment crosses district boundaries:
+            REQUIRE the declared raster-weighted district combination rule.
+            USE covered population weights only when the necessary geometries exist.
+        END IF
+        IF employment diagnostics are requested and denominators are valid:
+            emp_primary_pct <- emp_primary / emp_total.
+            emp_secondary_pct <- emp_secondary / emp_total.
+            emp_tertiary_pct <- emp_tertiary / emp_total.
+            district_emp_to_pop_ratio <- emp_total / total_pop_age.
+            LABEL these fields outside the paper's mandatory Equation (14) inputs.
+        END IF
+        CHECK population estimate is nonnegative when valid.
+        CHECK each valid age and education share lies within its declared range.
+        CHECK category sums according to the source definitions.
+        CHECK valid household size is positive.
+        STORE units, denominators, geographic assumption, and census vintage.
+        STORE explicit canonical-to-legacy aliases instead of relying on downstream name guessing.
+        APPEND the station record with its stable index.
+    END FOR
+    BUILD a station-indexed feature table.
+    REINDEX it to the canonical network station order.
+    ADD missing records explicitly rather than compacting the station axis.
+    REQUIRE the chosen downstream policy to resolve missing mandatory features.
+    RETURN table and diagnostic report.
+END PROCEDURE
+
+PROCEDURE main
+    INPUT external paths, reviewed alias table, geospatial and census contracts.
+    OUTPUT validated static-feature artifact or explicit failure.
+    REPORT start of station-feature preparation.
+    STAGE 1: LOAD STATION-DISTRICT MAPPING.
+        CALL load_automated_map.
+        IF mapping load fails or contains unresolved blocking conflicts:
+            STOP without publishing an output feature artifact.
+        END IF
+    STAGE 2: LOAD STATION COORDINATES.
+        CALL load_station_data_from_csv.
+        IF no valid coordinates are available:
+            STOP with the coordinate diagnostic.
+        END IF
+        ALIGN coordinate station names to the network registry.
+    STAGE 3: OPEN RASTER AND DERIVE FEATURES.
+        OPEN the declared population raster using a scoped resource handle.
+        VERIFY CRS, band count, nodata definition, and population units.
+        CALL generate_station_level_socio_demographics with all source paths.
+        CLOSE the raster even when a station extraction fails.
+        ON raster absence:
+            REPORT the missing input; do not create synthetic population values.
+        ON unexpected extraction error:
+            REPORT sanitized diagnostics and mark the stage failed.
+    STAGE 4: VALIDATE AND SAVE.
+        REQUIRE a nonempty table with one record per declared network station.
+        REQUIRE every paper-feature column or an explicit unresolved-feature status.
+        RECORD the feature schema and row-order identifier.
+        WRITE table and metadata to the intended artifact destination.
+        VERIFY the persisted row count and feature names.
+        REPORT an aggregate feature summary and missingness counts.
+    RETURN output receipt and diagnostics.
+END PROCEDURE

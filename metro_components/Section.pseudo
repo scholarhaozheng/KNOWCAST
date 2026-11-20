@@ -1,0 +1,38 @@
+MODULE Section
+PURPOSE Represent one directed physical section on one serving line.
+PAPER Eq. (24) and Eqs. (25)–(26).
+
+CLASS Section
+    STATE start_station, terminal_station, section_line
+    STATE depart_freq, visit_prob, service_status, probability_context
+END CLASS
+
+PROCEDURE Section.__init__(start_station, terminal_station, section_line)
+    INPUT canonical endpoints and line ID.
+    OUTPUT a section with uncomputed annotations.
+    CHECK endpoints share a station manifest and form a directed section on section_line
+    self.start_station <- start_station
+    self.terminal_station <- terminal_station
+    self.section_line <- section_line
+    self.depart_freq, self.visit_prob <- UNCOMPUTED
+    self.service_status, self.probability_context <- UNCOMPUTED
+    FREEZE endpoint and line identity
+    RETURN self
+END PROCEDURE
+
+PROCEDURE Section.__hash__()
+    INPUT immutable section identity.
+    OUTPUT hash value.
+    RETURN HASH((self.start_station.index,self.terminal_station.index,self.section_line))
+END PROCEDURE
+
+PROCEDURE Section.__eq__(other)
+    INPUT candidate record.
+    OUTPUT Boolean or NOT_COMPARABLE.
+    IF other is not a Section record:
+        RETURN NOT_COMPARABLE
+    END IF
+    CHECK enclosing station manifests agree
+    RETURN (self.start_station.index,self.terminal_station.index,self.section_line)
+            = (other.start_station.index,other.terminal_station.index,other.section_line)
+END PROCEDURE

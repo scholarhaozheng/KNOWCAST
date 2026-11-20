@@ -1,0 +1,62 @@
+MODULE Path
+PURPOSE Extend candidate paths without mutating accepted paths.
+PAPER Candidate paths and directed incidence in Sections 4.5 and 4.7.
+
+CLASS Path
+    STATE from_stop, to_stop, start_index, end_index, routes, path_number
+    STATE station_visit_sequence, station_visit_sequence_index, transfer_count
+    DERIVED structural_signature: ordered line IDs and station-index tuples for every route
+END CLASS
+
+PROCEDURE Path.__init__()
+    INPUT none.
+    OUTPUT an empty Path.
+    self.from_stop, self.to_stop, self.start_index, self.end_index <- UNSET
+    self.routes, self.station_visit_sequence, self.station_visit_sequence_index <- empty lists
+    self.path_number <- UNASSIGNED
+    self.transfer_count <- 0
+    RETURN self
+END PROCEDURE
+
+PROCEDURE Path.__lt__(other)
+    INPUT another Path.
+    OUTPUT deterministic lexicographic tie order.
+    IF other is not a Path:
+        RETURN NOT_COMPARABLE
+    END IF
+    RETURN self.structural_signature < other.structural_signature
+END PROCEDURE
+
+PROCEDURE Path.add_path(route)
+    INPUT a valid contiguous Route and the caller's topology/loop policy.
+    OUTPUT an independent extended Path.
+    CHECK route.valid and route.stops=length(route.stations)-1
+    CHECK route first/last station indices equal route.start_index/end_index
+    result <- COPY mutable path lists and route records; share canonical Station identities
+    result.path_number <- UNASSIGNED
+    IF self.routes is empty:
+        result.from_stop, result.start_index <- route starting name and index
+        result.station_visit_sequence <- COPY route.stations
+        result.routes <- [COPY route]
+    ELSE:
+        IF self.end_index != route.start_index:
+            RAISE DisconnectedPathExtension
+        END IF
+        APPEND route.stations[1..end] to result.station_visit_sequence
+        IF result.routes[-1].line_number=route.line_number:
+            merged <- COPY result.routes[-1]
+            APPEND route.stations[1..end] to merged.stations
+            merged.to_stop, merged.end_index <- route terminal name and index
+            merged.stops <- length(merged.stations)-1
+            result.routes[-1] <- merged
+        ELSE:
+            APPEND COPY route to result.routes
+        END IF
+    END IF
+    result.to_stop, result.end_index <- route terminal name and index
+    result.station_visit_sequence_index <- global indices of result.station_visit_sequence
+    CHECK all consecutive sections have directed topology support
+    APPLY caller's loop policy to repeated physical stations and sections
+    result.transfer_count <- number of actual adjacent line changes in result.routes
+    RETURN result
+END PROCEDURE

@@ -1,0 +1,1249 @@
+MODULE models.Net_0207
+PURPOSE Build knowledge features and forecast compressed OD flows.
+PAPER Sections 3.2, 4.1-4.8 and 5.1.4; Eqs. (7)-(33).
+FORMAT Non-executable pseudocode; numerical architecture choices are input parameters.
+
+INPUT BatchBundle
+    encoder_steps[l_h], decoder_steps[l_f], sample_ids[B], valid_mask[B].
+    forecast_origin[B], xtime[B,l_h], ytime[B,l_f], graph layout and artifact IDs.
+    target_od[B,l_f,N,K] is present only for supervised training.
+    Historical steps contain x_od and allocation_day/week/month in the same model scale.
+    Future steps contain cutoff-available knowledge; targets remain a separate field.
+OUTPUT ForecastBundle
+    od_normalized[B,l_f,N,K], sample_ids, valid_mask, forecast_origin, target_timestamps.
+    assignment_context_by_step[horizon][sample_id] and probability/feasibility aliases.
+    generation_targets: original-scale production/attraction[B,l_f,N], timestamps and transform IDs.
+    diagnostics.generation_targets aliases generation_targets.
+    Optional path_flows_by_step, section_flows_by_step and assignment_diagnostics_by_step.
+PARAMETERS
+    N stations; R retained destinations per origin; K=K_od=R+1; residual slot R.
+    h recurrent width; L recurrent layers; L_lines service lines; all software indices start at zero.
+    Fixed RDS[N,R], transforms, feature layouts and timestamp interval.
+    ServiceRecord: raw_frequency, encoder_frequency, support and known_status[N,N,L_lines].
+    Service units are trains_per_hour; encoder_scale identifies raw or transformed values.
+    Array metadata carries station/RDS/line order, representation, transform ID and availability.
+    Tensor arithmetic preserves gradients unless a frozen-estimator or legacy-feedback branch detaches.
+
+CLASS UtilityLayer
+    PURPOSE Linear path utility, Eq. (22).
+    PARAMETERS weights[Phi], ordered attribute schema, trainability flag.
+END CLASS
+
+PROCEDURE UtilityLayer.__init__(input_dim, options)
+    INPUT options.attribute_schema, optional coefficients and trainability.
+    IF options.coefficients is absent AND schema=[station_count,transfer_count]:
+        weights <- [-0.30,-0.573].
+    ELSE:
+        weights <- options.coefficients in schema order.
+    END IF.
+    IF length(weights) != input_dim: RAISE Error(attribute_dimension_mismatch).
+    REGISTER weights with trainability=options.trainable.
+    RETURN this layer.
+END PROCEDURE
+
+PROCEDURE UtilityLayer.forward(x)
+    INPUT finite attributes[...,Phi], including finite padded rows.
+    OUTPUT utility[...] on the same tensor device.
+    FOR each candidate index a:
+        utility[a] <- SUM(weights[phi]*x[a,phi], phi=0..Phi-1).
+    END FOR.
+    RETURN utility.
+END PROCEDURE
+
+CLASS LogitLayer
+    PURPOSE Per-OD feasible-path softmax, Eq. (23).
+    PARAMETERS empty_set_policy = error or return_unassignable.
+END CLASS
+
+PROCEDURE LogitLayer.__init__(options)
+    empty_set_policy <- options.empty_set_policy.
+    RETURN this parameter-free layer.
+END PROCEDURE
+
+PROCEDURE LogitLayer.forward(utility, feasible_mask)
+    INPUT utility and feasible_mask with matching shape [...,P].
+    probability <- zeros with utility.shape.
+    FOR each leading OD/time index a:
+        valid <- candidate positions whose feasible_mask[a,p] is true.
+        IF valid is empty:
+            IF empty_set_policy=error: RAISE Error(no_feasible_path,a).
+            ELSE: CONTINUE with probability[a,:]=0.
+            END IF.
+        END IF.
+        maximum <- MAX(utility[a,p], p in valid).
+        denominator <- SUM(EXP(utility[a,p]-maximum), p in valid).
+        FOR p in valid:
+            probability[a,p] <- EXP(utility[a,p]-maximum)/denominator.
+        END FOR.
+    END FOR.
+    RETURN probability.
+END PROCEDURE
+
+CLASS SimpleAutoencoder
+    PURPOSE Configurable use of the retained linear-ReLU-linear AE option.
+    PAPER Sections 4.4.3 and 4.6 specify pretraining followed by encoder fine-tuning.
+    PARAMETERS encoder_weight[latent_dim,input_dim], encoder_bias[latent_dim].
+    PARAMETERS decoder_weight[input_dim,latent_dim], decoder_bias[input_dim].
+    Other supplied architectures use ConfiguredAutoencoder below.
+END CLASS
+
+PROCEDURE SimpleAutoencoder.__init__(input_dim, latent_dim, initializer)
+    ALLOCATE encoder_weight, encoder_bias, decoder_weight, decoder_bias at their declared shapes.
+    INITIALIZE all tensors with initializer and REGISTER them once.
+    RETURN this autoencoder.
+END PROCEDURE
+
+PROCEDURE SimpleAutoencoder.forward(x)
+    latent <- encode(x).
+    reconstruction <- latent * TRANSPOSE(decoder_weight) + decoder_bias.
+    RETURN latent, reconstruction.
+END PROCEDURE
+
+PROCEDURE SimpleAutoencoder.encode(x)
+    INPUT x[...,input_dim].
+    latent <- RELU(x * TRANSPOSE(encoder_weight) + encoder_bias).
+    RETURN latent[...,latent_dim] using this instance's registered encoder parameters.
+END PROCEDURE
+
+CLASS ImpedanceLayer
+    PURPOSE Generalized-cost deterrence for Eq. (20).
+    PARAMETERS paper_exponential: fixed calibrated zeta>0.
+    PARAMETERS legacy_inverse_power: gamma and its trainability.
+END CLASS
+
+PROCEDURE ImpedanceLayer.__init__(initial_gamma=1.0, options)
+    profile <- options.profile.
+    IF profile=paper_exponential:
+        zeta <- options.calibrated_zeta.
+        IF zeta <= 0 OR nonfinite(zeta): RAISE Error(invalid_calibration).
+        REGISTER zeta as fixed state.
+    ELSE IF profile=legacy_inverse_power:
+        REGISTER gamma <- initial_gamma with options.trainable.
+    ELSE:
+        RAISE Error(unknown_impedance_profile).
+    END IF.
+    RETURN this layer.
+END PROCEDURE
+
+PROCEDURE ImpedanceLayer.forward(c_ij)
+    INPUT cost[N,N] and the configured feasible support.
+    IF profile=paper_exponential:
+        log_f <- -zeta*c_ij on supported pairs; -infinity elsewhere.
+        IF direct exponentiation underflows on required support:
+            RETURN {representation:logarithmic,log_values:log_f}.
+        END IF.
+        f <- EXP(log_f).
+    ELSE:
+        cost <- COPY(c_ij).
+        ADD 1e-6 to cost's diagonal for this legacy branch.
+        IF any used cost <= 0: RAISE Error(nonpositive_power_cost).
+        f <- cost ^ (-CLAMP(gamma,0.9,1.0)).
+    END IF.
+    RETURN {representation:linear,values:f}.
+END PROCEDURE
+
+CLASS GravityModelNetwork
+    PURPOSE Doubly constrained gravity distribution, Eq. (20).
+    INPUT P[N], A[N], cost[N,N] with balanced nonnegative margins.
+    OUTPUT Q[N,N], status and marginal errors.
+    PARAMETERS deterrence profile, support, IPF tolerance and maximum iterations.
+END CLASS
+
+PROCEDURE GravityModelNetwork.__init__(options)
+    initial_gamma <- options.gamma if supplied, otherwise the legacy default 1.0.
+    impedance_layer <- ImpedanceLayer(initial_gamma,options.deterrence).
+    profile, support, tolerance, maximum_iterations <- options.
+    RETURN this component.
+END PROCEDURE
+
+PROCEDURE GravityModelNetwork.forward(O_i, D_j, c_ij)
+    P <- O_i[N]; A <- D_j[N].
+    IF negative(P,A) OR unequal(SUM(P),SUM(A),tolerance):
+        RAISE Error(incompatible_margins).
+    END IF.
+    IF SUM(P)=0:
+        RETURN zeros[N,N], {status=all_zero_margin,row_error=zeros[N],column_error=zeros[N]}.
+    END IF.
+    kernel <- impedance_layer.forward(c_ij).
+    IF profile=paper_exponential:
+        log_f <- kernel.log_values if kernel.representation=logarithmic, otherwise LOG(kernel.values).
+        positive_origins <- indices where P>0; positive_destinations <- indices where A>0.
+        log_B_origin <- zeros[N]; log_B_destination <- zeros[N].
+        FOR iteration=1..maximum_iterations:
+            FOR m in positive_origins:
+                denominator <- LOGSUMEXP(log_B_destination[n]+LOG(A[n])+log_f[m,n],
+                    n in positive_destinations).
+                IF denominator=-infinity: RAISE Error(infeasible_origin_support,m).
+                log_B_origin[m] <- -denominator.
+            END FOR.
+            FOR n in positive_destinations:
+                denominator <- LOGSUMEXP(log_B_origin[m]+LOG(P[m])+log_f[m,n],
+                    m in positive_origins).
+                IF denominator=-infinity: RAISE Error(infeasible_destination_support,n).
+                log_B_destination[n] <- -denominator.
+            END FOR.
+            Q <- zeros[N,N].
+            FOR supported (m,n) with P[m]>0 and A[n]>0:
+                Q[m,n] <- EXP(log_B_origin[m]+LOG(P[m])+log_B_destination[n]+LOG(A[n])+log_f[m,n]).
+            END FOR.
+            row_error <- SUM(Q,destination_axis)-P.
+            column_error <- SUM(Q,origin_axis)-A.
+            IF MAX_ABS(row_error,column_error)<=tolerance:
+                RETURN Q,{status=converged,row_error,column_error,iterations=iteration}.
+            END IF.
+        END FOR.
+        RAISE Error(ipf_nonconvergence,row_error,column_error).
+    ELSE:
+        f <- kernel.values; SET diagonal(f) <- 0; Q <- zeros[N,N].
+        FOR m=0..N-1:
+            IF P[m]=0: CONTINUE.
+            denominator <- SUM(A[n]*f[m,n],n=0..N-1).
+            IF denominator<=0: RAISE Error(infeasible_origin_support,m).
+            Q[m,:] <- P[m]*A*f[m,:]/denominator.
+        END FOR.
+        RETURN Q,{status=legacy_singly_constrained,
+            row_error=SUM(Q,destination_axis)-P,column_error=SUM(Q,origin_axis)-A}.
+    END IF.
+END PROCEDURE
+
+CLASS Net_0207
+    PURPOSE Combine knowledge features with recurrent OD forecasting.
+    PARAMETERS OD network, active feature encoders, utility coefficients and optional generic encoder.
+    STATE Fixed maps/transforms, gravity calibration, independent generation estimators, global_step.
+    INPUT BatchBundle; OUTPUT ForecastBundle.
+END CLASS
+
+PROCEDURE Net_0207.__init__(cfg, logger)
+    cfg, logger, flags <- cfg, logger, cfg.component_switches.
+    generation_inputs_required <- flags.generation_guidance OR flags.trip_distribution.
+    path_inputs_required <- flags.traffic_assignment OR flags.path_outputs.
+    generic_contract <- cfg.generic_exogenous_contract if flags.generic_exogenous_enabled, otherwise absent.
+    service_inputs_required <- flags.depart_freq OR path_inputs_required
+        OR (generic_contract is present AND raw_service is in generic_contract.input_schema.raw_dependencies).
+    N,K_od,R,h,L,l_h,l_f <- cfg.model dimensions and fixed RDS width.
+    global_step <- 0; initialization_mode <- cfg.initialization_mode.
+    artifacts <- cfg.artifacts; fixed_RDS <- artifacts.RDS; od_scaler <- artifacts.od_scaler.
+    station_manager, residual_shares <- artifacts.station_manager, artifacts.residual_shares.
+    line_id_to_channel <- {line_id:channel for channel,line_id in ENUMERATE(artifacts.line_ids)}.
+    output_policy <- cfg.evaluation.output_nonnegativity_policy.
+    IF output_policy is a name: output_policy <- {kind:output_policy,id:output_policy}.
+    zero_start_representation <- cfg.model.zero_start_representation.
+    training_options <- cfg.train.feedback if present, otherwise cfg.train.
+    architecture <- cfg.model.architecture.
+    history_references <- [day,week,month] if architecture.encoder_profile=paper, otherwise [day,week].
+    registry <- empty parameter-owning module registry.
+    IF artifact dimensions or station/RDS/scaler IDs differ from cfg:
+        RAISE Error(incompatible_model_artifacts).
+    END IF.
+    IF path_inputs_required:
+        utility_options <- cfg.utility with trainable=flags.traffic_assignment AND cfg.utility.trainable.
+        utility_layer <- REGISTER UtilityLayer(cfg.utility.input_dim,utility_options).
+        logit_layer <- LogitLayer({empty_set_policy:cfg.path.empty_set_policy}).
+        IF flags.path_outputs AND NOT flags.traffic_assignment:
+            RESTORE fixed requested utility state or use its declared coefficients.
+        END IF.
+    END IF.
+    IF generation_inputs_required:
+        FOR task in [production,attraction]:
+            generation_estimators[task] <- LOAD artifacts.generation[task] once.
+            SET generation_estimators[task]'s mode and trainability from cfg.generation.parameter_policy.
+            generation_transform_ids[task] <- generation_estimators[task].target_transform.id.
+            REGISTER its trainable parameters when that policy is joint_update.
+        END FOR.
+    END IF.
+    IF flags.trip_distribution:
+        gravity_model <- GravityModelNetwork(cfg.gravity).
+        distribution_encoder <- make_feature_autoencoder(artifacts.distribution_encoder).encoder_view.
+        origin_adapter <- build_origin_adapter(cfg.distribution.origin_alignment).
+        REGISTER distribution_encoder and any learned origin_adapter parameters.
+    END IF.
+    IF flags.traffic_assignment:
+        FOR module_id in distinct cfg.path.OD_to_module_id values:
+            path_encoders[module_id] <- REGISTER make_feature_autoencoder(artifacts.path[module_id]).encoder_view.
+        END FOR.
+        missing_path_adapter <- cfg.path.missing_feature_adapter or absent.
+        REGISTER any parameters of the selected missing_path_adapter.
+    END IF.
+    IF flags.depart_freq:
+        FOR module_id in distinct cfg.service.line_to_module_id values:
+            service_encoders[module_id] <- REGISTER make_feature_autoencoder(artifacts.service[module_id]).encoder_view.
+        END FOR.
+    END IF.
+    IF flags.generic_exogenous_enabled:
+        generic_encoder <- REGISTER build_generic_encoder(generic_contract.encoder_spec,cfg.initializer,cfg.device).
+    END IF.
+    FOR each active pretrained feature encoder:
+        SET its already restored encoder parameters trainable for forecasting.
+    END FOR.
+    feature_layouts <- cfg.model.feature_layouts derived from the enabled feature blocks.
+    OD <- REGISTER ODNet_att(cfg with model.feature_layouts=feature_layouts,logger).
+    intermediate_activation <- REGISTER architecture.intermediate_activation, or identity.
+    MOVE registry and fixed numerical state to cfg.device and cfg.dtype.
+    IF initialization_mode is resume_training or evaluate_checkpoint:
+        state_ready <- false until checkpoint_contract(load,selected_checkpoint) completes.
+    ELSE:
+        state_ready <- true.
+    END IF.
+    RETURN this model.
+END PROCEDURE
+
+PROCEDURE Net_0207.inverse_sigmoid_scheduler_sampling(step, k)
+    INPUT finite step>=0 and k>0; legacy feedback schedule.
+    a <- step/k - LOG(k).
+    IF a>=0:
+        small <- EXP(-a).
+        RETURN small/(1+small).
+    ELSE:
+        RETURN 1/(1+EXP(a)).
+    END IF.
+END PROCEDURE
+
+PROCEDURE Net_0207.encoder_od_do(sequences, edge_index, edge_attr=absent)
+    INPUT l_h prepared historical steps in chronological order.
+    finished_hidden <- absent; reference_states <- {day:absent,week:absent,month:absent}.
+    long_his_hidden,short_his_hidden <- absent,absent.
+    enc_hiddens <- [absent for each of L layers].
+    IF flags.history_distribution AND L>1 AND architecture.intermediate_fusion!=per_step_upper_layers_extension:
+        RAISE Error(missing_parameter,intermediate_fusion_for_upper_layers).
+    END IF.
+    FOR i=0..l_h-1:
+        step <- sequences[i].
+        edges,attributes <- step topology if present, otherwise the supplied shared topology.
+        IF architecture.encoder_profile=paper AND flags.history_distribution:
+            fuse_now <- i=l_h-1 OR L>1.
+            current,finished_hidden,reference_states,first_hidden <-
+                OD.encoder_first_layer_paper(step,finished_hidden,reference_states,edges,attributes,fuse_now).
+        ELSE IF architecture.encoder_profile=legacy_two_reference:
+            current,finished_hidden,long_his_hidden,short_his_hidden,first_hidden <-
+                OD._encoder_first_layer_v1(step,finished_hidden,long_his_hidden,short_his_hidden,edges,attributes).
+        ELSE:
+            current,finished_hidden,first_hidden <-
+                OD._encoder_first_layer_v2(step,finished_hidden,edges,attributes).
+        END IF.
+        IF first_hidden is present: enc_hiddens[0] <- first_hidden.
+        FOR index=0..L-2:
+            current <- intermediate_activation(current).
+            current,enc_hiddens[index+1] <-
+                OD.encoder_second_layer(index,current,enc_hiddens[index+1],edges,attributes).
+        END FOR.
+    END FOR.
+    RETURN {states:enc_hiddens,layout:sequences[-1].layout}.
+    PAPER Eq. (10)-(13) use final-window fusion; per-step fusion for upper recurrent layers is a supplied extension.
+END PROCEDURE
+
+PROCEDURE Net_0207.scheduled_sampling(out, label, GO)
+    INPUT out[B,N,K_od], optional label[B,N,K_od], GO[V_total,K_od] in model scale.
+    V_total <- number of rows in GO.
+    from_prediction <- false.
+    IF prediction_mode is inference or validation:
+        selected <- out; from_prediction <- true.
+    ELSE IF training_profile=paper_teacher_forcing:
+        selected <- label.
+    ELSE IF training_options.use_curriculum_learning:
+        probability <- inverse_sigmoid_scheduler_sampling(global_step,training_options.cl_decay_steps).
+        from_prediction <- UNIFORM(training_options.random_stream)>=probability.
+        selected <- out if from_prediction, otherwise label.
+    ELSE:
+        selected <- out; from_prediction <- true.
+    END IF.
+    IF legacy_feedback AND training_options.detach_prediction AND from_prediction:
+        selected <- DETACH(selected).
+    END IF.
+    IF legacy_feedback AND NOT training_options.use_input:
+        selected <- GO.
+    END IF.
+    RETURN RESHAPE(selected,[V_total,K_od]).
+END PROCEDURE
+
+PROCEDURE Net_0207.decoder_od_do(sequences, enc_hiddens_od, edge_index, edge_attr=absent)
+    INPUT prepared future steps, encoder states and graph layout.
+    B,sample_ids,V_total <- sequences[0].layout.
+    decoder_states <- COPY_CONTAINER(enc_hiddens_od.states).
+    IF zero_start_representation=model_scale_zero:
+        GO <- zeros[V_total,K_od].
+    ELSE IF zero_start_representation=flow_scale_zero:
+        GO <- transform_OD(zeros[V_total,K_od] in flow units).
+    ELSE:
+        RAISE Error(missing_parameter,zero_start_representation).
+    END IF.
+    previous_od <- GO.
+    predictions,assignment_contexts,path_flows,section_flows,assignment_diagnostics <- empty lists.
+    FOR horizon=0..l_f-1:
+        step <- sequences[horizon].
+        FOR j=0..B-1:
+            node_slice <- step.ptr[j]:step.ptr[j+1].
+            knowledge <- step.knowledge_by_example[sample_ids[j]].
+            features[j] <- assemble_node_features(previous_od[node_slice,:],knowledge,feature_layouts.decoder).
+        END FOR.
+        decoder_input <- CONCATENATE(features,node_axis).
+        edges,attributes <- step topology if present, otherwise the supplied shared topology.
+        current,decoder_states[0] <- OD.decoder_first_layer(decoder_input,decoder_states[0],edges,attributes).
+        FOR index=0..L-2:
+            current <- intermediate_activation(current).
+            current,decoder_states[index+1] <-
+                OD.decoder_second_layer(index,current,decoder_states[index+1],edges,attributes).
+        END FOR.
+        prediction <- OD.apply_readout(current,step.layout).
+        APPEND prediction[B,N,K_od] to predictions.
+        IF path_inputs_required:
+            APPEND {sample_id:step.knowledge_by_example[sample_id].assignment_context} to assignment_contexts.
+        END IF.
+        IF flags.path_outputs:
+            flow <- apply_flow_output_policy(inverse_transform_OD(prediction),output_policy).
+            FOR j=0..B-1:
+                path[j],section[j],diagnostic[j] <- assign_prediction(
+                    flow[j],step.knowledge_by_example[sample_ids[j]],step.timestamp[j],fixed_RDS).
+            END FOR.
+            APPEND sample-keyed path,section,diagnostic to their output lists.
+        END IF.
+        IF horizon<l_f-1:
+            label <- step.teacher_target if training_mode, otherwise absent.
+            previous_od <- scheduled_sampling(prediction,label,GO).
+        END IF.
+    END FOR.
+    IF training_mode: global_step <- global_step+1.
+    RETURN {predictions:STACK(predictions,axis=1),assignment_contexts,
+        path_flows,section_flows,assignment_diagnostics}.
+END PROCEDURE
+
+PROCEDURE Net_0207.forward(batch_bundle_or_sequences, sequences_y=absent, mode=declared)
+    INPUT BatchBundle or the explicit legacy list adapter; execution mode.
+    OUTPUT ForecastBundle.
+    set_execution_mode(mode).
+    IF NOT state_ready: RAISE Error(checkpoint_restore_pending).
+    bundle <- batch_bundle_or_sequences.
+    IF bundle is the legacy list interface:
+        bundle <- cfg.legacy_batch_adapter(bundle,sequences_y).
+    END IF.
+    B <- length(bundle.sample_ids); V_total <- B*N.
+    current_state_id <- STATE_ID(registry).
+    IF lengths(bundle.encoder_steps,bundle.decoder_steps)!=(l_h,l_f)
+        OR bundle station/RDS/scaler IDs differ from this model:
+        RAISE Error(incompatible_batch).
+    END IF.
+    encoder_steps <- prepare_encoder_steps(bundle).
+    decoder_steps <- prepare_decoder_steps(bundle).
+    encoder_context <- encoder_od_do(encoder_steps,absent,absent).
+    result <- decoder_od_do(decoder_steps,encoder_context,absent,absent).
+    forecast <- {od_normalized:result.predictions,
+        assignment_context_by_step:result.assignment_contexts,
+        sample_ids:bundle.sample_ids,valid_mask:bundle.valid_mask,
+        forecast_origin:bundle.forecast_origin,target_timestamps:bundle.ytime,
+        RDS_id:artifacts.RDS_id,scaler_id:artifacts.scaler_id,model_state_id:current_state_id}.
+    IF path_inputs_required:
+        forecast.path_probabilities_by_step <- views of result.assignment_contexts.path_probabilities.
+        forecast.feasible_sets_by_step <- views of result.assignment_contexts.feasible_sets.
+    END IF.
+    forecast.generation_targets <- absent.
+    IF flags.generation_guidance:
+        FOR horizon=0..l_f-1:
+            FOR j=0..B-1:
+                knowledge <- decoder_steps[horizon].knowledge_by_example[bundle.sample_ids[j]].
+                production[j,horizon,:] <- knowledge.production.
+                attraction[j,horizon,:] <- knowledge.attraction.
+            END FOR.
+        END FOR.
+        forecast.generation_targets <- {production,attraction,target_timestamps:bundle.ytime,
+            transform_ids:generation_transform_ids,parameter_policy:cfg.generation.parameter_policy,
+            input_availability:[step.generation_availability for step in decoder_steps]}.
+    END IF.
+    forecast.diagnostics.generation_targets <- ALIAS(forecast.generation_targets).
+    IF flags.path_outputs:
+        forecast.path_flows_by_step <- result.path_flows.
+        forecast.section_flows_by_step <- result.section_flows.
+        forecast.assignment_diagnostics_by_step <- result.assignment_diagnostics.
+    END IF.
+    RETURN forecast.
+END PROCEDURE
+
+PROCEDURE Net_0207.forward.load_from_pkl(filename)
+    INPUT filename resolved under the configured artifact root.
+    artifact <- READ the serialized record once during preparation/loading.
+    COMPARE artifact type, station order and timestamp/schema IDs with the requested artifact contract.
+    IF incompatible: RAISE Error(incompatible_artifact,filename).
+    RETURN artifact.
+END PROCEDURE
+
+PROCEDURE Net_0207.build_knowledge_for_step(t, t0, sample_id, station_features,
+    additional_features, auxiliary_context_by_task, generic_exogenous_inputs,
+    edges, edge_attributes, paths, service, dynamic_impedance=absent)
+    INPUT One sample/time's already sliced, cutoff-available knowledge inputs.
+    knowledge <- {target_time:t,forecast_origin:t0,sample_id,artifact_ids:artifacts.identities}.
+    IF flags.generic_exogenous_enabled:
+        x <- generic_encoder.transform_input(generic_exogenous_inputs).
+        knowledge.generic_exogenous_by_origin <- generic_encoder.forward(x).
+    END IF.
+    IF generation_inputs_required:
+        result <- estimate_generation(auxiliary_context_by_task,t,t0).
+        knowledge.production,knowledge.attraction <- result.production,result.attraction.
+        knowledge.generation_availability <- result.availability.
+    END IF.
+    IF flags.trip_distribution:
+        P,A <- cfg.gravity.margin_policy(COPY(knowledge.production),COPY(knowledge.attraction)).
+        Q,status <- gravity_model.forward(P,A,dynamic_impedance.values).
+        compressed <- compress_distribution(Q).
+        payload <- encoder_payload(compressed,flow_units,[origin,compressed_destination],knowledge,dynamic_impedance.metadata).
+        vector,_ <- materialize_encoder_input(payload,distribution_encoder.manifest).
+        latent <- distribution_encoder.encode(vector).
+        knowledge.distribution_by_origin <- origin_adapter.forward(latent).
+    END IF.
+    IF path_inputs_required:
+        context,path_embeddings <- build_path_context(paths,service,knowledge).
+        knowledge.assignment_context <- context.
+        knowledge.path_probabilities <- ALIAS(context.path_probabilities).
+        knowledge.feasible_sets <- ALIAS(context.feasible_sets).
+        knowledge.incidence <- ALIAS(context.incidence).
+        knowledge.line_aware_routes <- ALIAS(context.line_aware_routes).
+        knowledge.path_status <- ALIAS(context.path_status).
+        knowledge.path_embedding <- path_embeddings.
+    END IF.
+    IF flags.depart_freq:
+        knowledge.service_embedding <- build_service_features(service,knowledge).
+        knowledge.shared_service <- CONCATENATE(knowledge.service_embedding in fixed line order).
+    END IF.
+    FOR m=0..N-1:
+        FOR slot=0..R-1:
+            n <- fixed_RDS[m,slot]; blocks <- empty list.
+            IF flags.traffic_assignment: APPEND knowledge.path_embedding[(m,n)] to blocks.
+            IF flags.depart_freq: APPEND knowledge.shared_service to blocks.
+            knowledge.od_features[(m,n)] <- CONCATENATE(blocks), or a width-zero vector.
+        END FOR.
+    END FOR.
+    RETURN knowledge.
+END PROCEDURE
+
+PROCEDURE Net_0207.assemble_node_features(primary_OD, knowledge, layout)
+    INPUT primary_OD[N,K_od]; FeatureLayout with width and ordered blocks.
+    node_features <- empty[N,layout.width].
+    FOR m=0..N-1:
+        blocks <- [primary_OD[m,:]].
+        IF flags.generic_exogenous_enabled: APPEND knowledge.generic_exogenous_by_origin[m,:] to blocks.
+        IF flags.trip_distribution: APPEND knowledge.distribution_by_origin[m,:] to blocks.
+        FOR slot=0..R-1:
+            APPEND knowledge.od_features[(m,fixed_RDS[m,slot])] to blocks.
+        END FOR.
+        node_features[m,:] <- CONCATENATE(blocks,feature_axis).
+    END FOR.
+    RETURN node_features.
+    SHAPE width=K_od+enabled(F_mlp)+enabled(D_distribution)
+        +R*(enabled(D_path)+enabled(sum_of_line_latent_widths)).
+END PROCEDURE
+
+PROCEDURE Net_0207.legacy_cp_representation(sample_record, probabilities, mode)
+    INPUT Same-sample factors A[N,rho],B[N,rho],C[P,rho],D[N,rho],E[N,rho],weights[rho].
+    OUTPUT Directed approximate matrices or the selected legacy outgoing-only feature.
+    IF mode=exact_directed_reconstruction:
+        FOR o,d,p,a,b:
+            incidence_approx[o,d,p,a,b] <- SUM(weights[q]*A[o,q]*B[d,q]*C[p,q]*D[a,q]*E[b,q],q).
+        END FOR.
+        error <- COMPARE(incidence_approx,sample_record.exact_incidence).
+        IF error exceeds sample_record.approximation_tolerance:
+            RAISE Error(unacceptable_cp_approximation).
+        END IF.
+        RETURN SUM(probabilities[o,d,p]*incidence_approx[o,d,p,a,b],path_axis).
+    ELSE IF mode=source_outgoing_aggregate_vectorized:
+        combined[q] <- weights[q]*SUM(E[b,q],b).
+        T_eff <- SUM(BROADCAST(A,[N,1,1,1,rho])*BROADCAST(B,[1,N,1,1,rho])
+            *BROADCAST(C,[1,1,P,1,rho])*BROADCAST(D,[1,1,1,N,rho])*combined,rank_axis).
+    ELSE IF mode=source_outgoing_aggregate_rank_loop:
+        T_eff <- zeros[N,N,P,N].
+        FOR q=0..rho-1:
+            T_eff <- T_eff+OUTER(A[:,q],B[:,q],C[:,q],D[:,q])*weights[q]*SUM(E[:,q]).
+        END FOR.
+    ELSE:
+        RAISE Error(unknown_cp_mode).
+    END IF.
+    weighted <- T_eff*BROADCAST(probabilities,[N,N,P,1]).
+    RETURN FLATTEN(weighted,destination/path/section_start_axes) per origin.
+    The outgoing-only alternative sums away the section endpoint and is not used for directed assignment.
+END PROCEDURE
+
+PROCEDURE Net_0207.assign_prediction(predicted_flow, knowledge, target_time, fixed_RDS)
+    INPUT Original-scale predicted_flow[N,K_od] after the shared output policy.
+    OUTPUT path_flow, section_flow, diagnostics.
+    context <- knowledge.assignment_context.
+    CHECK context.target_time=target_time and output-policy ID matches this model.
+    section_flow <- zeros over directed physical sections.
+    path_flow,unassigned,invalid_signed,status <- empty keyed records.
+    FOR m=0..N-1:
+        FOR slot=0..R-1:
+            n <- fixed_RDS[m,slot]; q <- predicted_flow[m,slot].
+            IF nonfinite(q): RAISE Error(nonfinite_od_prediction,m,n).
+            IF q<0:
+                IF cfg.assignment.negative_policy=error: RAISE Error(negative_physical_flow,m,n).
+                invalid_signed[(m,n)] <- q; status[(m,n)] <- unavailable.
+                CONTINUE.
+            END IF.
+            feasible <- context.feasible_sets[(m,n)].
+            IF feasible is empty:
+                IF cfg.assignment.empty_policy=error: RAISE Error(unassignable_demand,m,n).
+                unassigned[(m,n)] <- q; status[(m,n)] <- unassignable.
+                CONTINUE.
+            END IF.
+            FOR p in feasible:
+                path_flow[(m,n),p] <- q*context.path_probabilities[(m,n),p].
+                FOR omega in context.incidence[(m,n),p]:
+                    section_flow[omega] <- section_flow[omega]+path_flow[(m,n),p].
+                END FOR.
+            END FOR.
+            CHECK SUM(path_flow[(m,n),p],p in feasible)=q within assignment tolerance.
+        END FOR.
+    END FOR.
+    diagnostics <- {unassigned_retained_flow:unassigned,invalid_signed_predictions:invalid_signed,status,
+        output_policy_id:output_policy.id,target_time,forecast_origin:context.forecast_origin}.
+    RETURN path_flow,section_flow,diagnostics.
+END PROCEDURE
+
+PROCEDURE Net_0207.apply_flow_output_policy(flow_prediction, policy)
+    INPUT Finite original-scale values with sample/station/RDS identities.
+    IF policy.kind in {none,identity}:
+        result <- flow_prediction.
+    ELSE IF policy.kind=legacy_clip_zero:
+        result <- MAX(flow_prediction,0).
+    ELSE IF policy.kind=model_constrained_nonnegative:
+        CHECK flow_prediction is nonnegative within the saved evaluation tolerance.
+        result <- flow_prediction.
+    ELSE:
+        result <- policy.deterministic_map(flow_prediction,policy.parameters).
+    END IF.
+    ATTACH representation=original_flow and output_policy_id=policy.id.
+    RETURN result with unchanged axes and identities.
+END PROCEDURE
+
+PROCEDURE Net_0207.prepare_autoencoders(training_corpora, architecture_manifest)
+    INPUT Family-specific training records, encoder/decoder specs, optimizer and training schedule.
+    fixed_RDS <- architecture_manifest.RDS; N,R <- SHAPE(fixed_RDS); K_od <- R+1.
+    OUTPUT Saved pretrained artifacts; called before constructing the main forecaster.
+    IF path family is selected:
+        pretraining_utility <- UtilityLayer(architecture_manifest.utility.input_dim,
+            architecture_manifest.utility with trainable=false).
+        normalization <- LogitLayer({empty_set_policy:architecture_manifest.path.empty_set_policy}).
+        FOR record in training_corpora.path_records:
+            probabilities <- normalization.forward(pretraining_utility.forward(record.attributes),record.feasible_mask).
+            matrix <- zeros[N,N].
+            FOR p in record.feasible_paths:
+                FOR (eta,mu) in record.incidence[p]: matrix[eta,mu] <- matrix[eta,mu]+probabilities[p].
+            END FOR.
+            APPEND matrix and its OD/time/availability metadata to that path module's training corpus.
+        END FOR.
+        SAVE its coefficient values, attribute schema and utility_state_id with the path corpus.
+    END IF.
+    IF service family is selected:
+        FOR record in training_corpora.service_records:
+            FOR channel,line in ENUMERATE(architecture_manifest.line_ids):
+                APPEND record.raw_frequency[:,:,channel] and its metadata to that line module's training corpus.
+            END FOR.
+        END FOR.
+    END IF.
+    IF distribution family is selected:
+        gravity <- GravityModelNetwork(architecture_manifest.gravity).
+        FOR record in training_corpora.distribution_records:
+            P,A <- architecture_manifest.gravity.margin_policy(record.production,record.attraction).
+            Q,_ <- gravity.forward(P,A,record.dynamic_impedance.values).
+            FOR m=0..N-1:
+                compressed[m,0:R] <- Q[m,fixed_RDS[m,:]].
+                compressed[m,R] <- SUM(Q[m,n],n outside fixed_RDS[m,:]).
+            END FOR.
+            APPEND compressed and its metadata to the distribution training corpus.
+        END FOR.
+    END IF.
+    FOR each requested family and its parameter-sharing module_id:
+        spec <- architecture_manifest[family,module_id].
+        autoencoder <- make_feature_autoencoder({architecture:spec,weights:absent}).
+        transform <- FIT(spec.input_transform,training_corpora[family,module_id]).
+        optimizer <- CREATE spec.optimizer over autoencoder.parameters.
+        FOR epoch in spec.epochs:
+            FOR raw_batch in training_corpora[family,module_id].minibatches:
+                input <- transform_and_vectorize(raw_batch,transform,spec.axis_layout).
+                latent,reconstruction <- autoencoder.forward(input).
+                loss <- MEAN((reconstruction-input)^2).
+                optimizer.zero_grad().
+                DIFFERENTIATE loss through this autoencoder's encoder and decoder.
+                optimizer.step().
+            END FOR.
+        END FOR.
+        artifact <- {architecture:spec,weights:autoencoder.parameters,input_transform:transform,
+            training_corpus_id:training_corpora[family,module_id].id,axis_layout:spec.axis_layout,
+            utility_state_id:pretraining_utility.id when family=path}.
+        SAVE artifact at the supplied family/module destination.
+    END FOR.
+    RETURN all saved artifact records.
+END PROCEDURE
+
+PROCEDURE Net_0207.materialize_encoder_input(payload, encoder_manifest)
+    INPUT Matrix payload with explicit axes, units, representation and availability.
+    IF payload availability exceeds its forecast_origin OR axes/units mismatch encoder_manifest:
+        RAISE Error(incompatible_encoder_payload).
+    END IF.
+    IF payload.representation_kind=raw_encoder_input:
+        normalized <- encoder_manifest.input_transform(payload.values).
+    ELSE IF payload.representation_kind=transformed_encoder_input
+        AND payload.transform_id=encoder_manifest.input_transform_id:
+        normalized <- payload.values.
+    ELSE:
+        RAISE Error(incompatible_transform).
+    END IF.
+    normalized <- encoder_manifest.support_mask_operation(normalized,payload.support).
+    ordered <- PERMUTE(normalized,encoder_manifest.example_axes followed by feature_axes).
+    vector <- COLLAPSE only feature_axes into the final input_dim axis.
+    RETURN vector,encoder_manifest.input_transform_id.
+    Row-based distribution encoders retain origin as an example axis; whole-matrix encoders flatten both matrix axes.
+END PROCEDURE
+
+PROCEDURE Net_0207.transform_OD(flow_values)
+    INPUT Original-scale [...,N,K_od] or graph-flattened equivalent with this model's IDs.
+    normalized <- (flow_values-od_scaler.mean)/od_scaler.scale using its saved broadcast axes.
+    ATTACH representation=normalized and transform_id=od_scaler.id.
+    RETURN normalized with leading axes and tensor gradients preserved.
+END PROCEDURE
+
+PROCEDURE Net_0207.inverse_transform_OD(model_values)
+    INPUT Normalized values tagged with od_scaler.id.
+    flow <- model_values*od_scaler.scale+od_scaler.mean using the same broadcast axes.
+    ATTACH representation=original_flow and passenger-count units.
+    RETURN flow with leading axes and gradients to model_values preserved.
+END PROCEDURE
+
+PROCEDURE Net_0207.checkpoint_contract(action, artifact)
+    IF action=save:
+        state <- {parameters:registry.state_dict(),fixed_artifacts:artifacts,
+            architecture,feature_layouts,global_step,generation_policy:cfg.generation.parameter_policy}.
+        IF artifact.resume_training:
+            state.optimizer <- artifact.optimizer.state.
+            state.random_stream <- artifact.random_stream.state.
+        END IF.
+        WRITE state to artifact.destination.
+        RETURN state.
+    ELSE IF action=load:
+        COMPARE every active parameter name/shape and station/RDS/scaler/architecture ID.
+        IF any active item is missing or incompatible: RAISE Error(checkpoint_mismatch).
+        RESTORE registry parameters and fixed artifacts from artifact.
+        IF initialization_mode=resume_training:
+            RESTORE optimizer,random_stream,global_step from artifact.
+        END IF.
+        state_ready <- true.
+        RETURN {status:restored,model_state_id:artifact.id}.
+    ELSE:
+        RAISE Error(unknown_checkpoint_action).
+    END IF.
+END PROCEDURE
+
+PROCEDURE Net_0207.legacy_only_od_adapter(forecast_bundle)
+    RETURN forecast_bundle.od_normalized.
+END PROCEDURE
+
+PROCEDURE Net_0207.set_execution_mode(mode)
+    supported <- {TRAIN_TEACHER_FORCING,TRAIN_LEGACY_SCHEDULED_SAMPLING,
+        AUTOREGRESSIVE_EVALUATION,AUTOREGRESSIVE_INFERENCE,LEGACY_SOURCE_EVALUATION}.
+    IF mode is not in supported: RAISE Error(unknown_execution_mode).
+    training_mode <- mode in {TRAIN_TEACHER_FORCING,TRAIN_LEGACY_SCHEDULED_SAMPLING}.
+    prediction_mode <- training if training_mode, otherwise validation.
+    IF mode=AUTOREGRESSIVE_INFERENCE: prediction_mode <- inference.
+    legacy_feedback <- mode in {TRAIN_LEGACY_SCHEDULED_SAMPLING,LEGACY_SOURCE_EVALUATION}.
+    training_profile <- legacy_scheduled_sampling if legacy_feedback, otherwise paper_teacher_forcing.
+    SET all active module training flags from training_mode.
+    SET frozen generation estimators to evaluation mode.
+    RETURN {training_mode,prediction_mode,training_profile,legacy_feedback}.
+END PROCEDURE
+
+PROCEDURE Net_0207.slice_example(step, j, target_time, forecast_origin)
+    INPUT Batched step and zero-based sample position.
+    start,end <- step.ptr[j],step.ptr[j+1].
+    IF end-start != N: RAISE Error(graph_size_mismatch).
+    selected_edges <- edges with both endpoints in [start,end).
+    IF any edge has exactly one endpoint in [start,end): RAISE Error(cross_sample_edge).
+    local <- {sample_id:step.sample_ids[j],target_time,forecast_origin,
+        edges:step.edge_index[selected_edges]-start,
+        edge_attributes:step.edge_attr[selected_edges] if present, otherwise absent}.
+    SET local.station_features,local.additional_features,local.auxiliary_context_by_task,
+        local.generic_exogenous_inputs,local.paths,local.service,local.dynamic_impedance <- absent.
+    FOR field required by active components:
+        SELECT field's sample slice according to its node-level or graph-level axis metadata.
+        KEEP each auxiliary context's complete inner input/decoder sequence.
+        local[field] <- selected field.
+    END FOR.
+    Required families are auxiliary_context_by_task and any present station/additional features for generation_inputs_required;
+        paths for path_inputs_required; ServiceRecord for service_inputs_required;
+        dynamic_impedance for trip_distribution; generic_exogenous_inputs for generic comparison.
+    local <- normalize_knowledge_records(local,step,j).
+    IF any selected field's availability exceeds forecast_origin:
+        RAISE Error(future_information,field).
+    END IF.
+    RETURN local.
+END PROCEDURE
+
+PROCEDURE Net_0207.prepare_encoder_steps(bundle)
+    B <- length(bundle.sample_ids); prepared <- empty list.
+    FOR i=0..l_h-1:
+        source <- bundle.encoder_steps[i].
+        step <- new record retaining source layout, ptr, topology and sample IDs.
+        step.knowledge_by_example <- empty keyed record.
+        step.finished_features <- empty[B*N,feature_layouts.finished.width].
+        IF flags.history_distribution:
+            step.unfinished_features <- empty arrays for history_references with their declared widths.
+        END IF.
+        FOR j=0..B-1:
+            t <- bundle.xtime[j,i]; t0 <- bundle.forecast_origin[j].
+            CHECK t=t0 shifted by (i-l_h) declared intervals.
+            local <- slice_example(source,j,t,t0).
+            knowledge <- knowledge_from_example(local).
+            node_slice <- source.ptr[j]:source.ptr[j+1].
+            step.finished_features[node_slice] <-
+                assemble_node_features(source.x_od[node_slice,:K_od],knowledge,feature_layouts.finished).
+            IF flags.history_distribution:
+                allocated <- prepare_unfinished_allocations(source,j,t0).
+                FOR reference in history_references:
+                    IF architecture.unfinished_knowledge_rule=include:
+                        branch <- assemble_node_features(allocated[reference],knowledge,feature_layouts.unfinished).
+                    ELSE:
+                        branch <- allocated[reference].
+                    END IF.
+                    step.unfinished_features[reference][node_slice] <- branch.
+                END FOR.
+            END IF.
+            step.knowledge_by_example[bundle.sample_ids[j]] <- knowledge.
+        END FOR.
+        step.x_od <- ALIAS(step.finished_features).
+        IF architecture.encoder_profile=legacy_two_reference:
+            step.history <- ALIAS(step.unfinished_features.week).
+            step.yesterday <- ALIAS(step.unfinished_features.day).
+        END IF.
+        APPEND step to prepared.
+    END FOR.
+    RETURN prepared.
+END PROCEDURE
+
+PROCEDURE Net_0207.prepare_unfinished_allocations(step, j, t0)
+    INPUT One sample's unfinished_raw[N,1] and its declared history representation.
+    node_slice <- step.ptr[j]:step.ptr[j+1].
+    U <- step.unfinished_raw[node_slice].
+    FOR reference in history_references:
+        IF step.representation_kind=unfinished_allocation:
+            result[reference] <- step[field_name=allocation_ + reference][node_slice].
+            CHECK allocation_scale=normalized and transform_id=od_scaler.id.
+            CHECK row sums of inverse_transform_OD(result[reference]) equal U.
+        ELSE IF step.representation_kind=raw_reference_inputs:
+            history <- step.raw_reference[reference][node_slice] in original flow units.
+            FOR m=0..N-1:
+                row,status <- history[m,:],history.availability[m].
+                IF status=missing:
+                    share <- cfg.history.missing_policy(reference,m,t0).replacement_share.
+                    CHECK finite nonnegative share[K_od] summing to one.
+                ELSE:
+                    IF nonfinite(row) OR negative(row,U[m]): RAISE Error(invalid_history,row).
+                    total <- SUM(row).
+                    share <- row/total if total>0, otherwise ones[K_od]/K_od.
+                END IF.
+                allocation[m,:] <- U[m]*share.
+            END FOR.
+            result[reference] <- transform_OD(allocation).
+        ELSE:
+            RAISE Error(unknown_history_representation).
+        END IF.
+    END FOR.
+    RETURN result.
+END PROCEDURE
+
+PROCEDURE Net_0207.prepare_decoder_steps(bundle)
+    B <- length(bundle.sample_ids); prepared <- empty list.
+    FOR horizon=0..l_f-1:
+        source <- bundle.decoder_steps[horizon].
+        step <- new record retaining source layout, ptr, topology and sample IDs.
+        step.knowledge_by_example <- empty keyed record.
+        step.timestamp <- bundle.ytime[:,horizon].
+        FOR j=0..B-1:
+            t,t0 <- step.timestamp[j],bundle.forecast_origin[j].
+            CHECK t=t0 shifted by horizon declared intervals.
+            local <- slice_example(source,j,t,t0).
+            knowledge <- knowledge_from_example(local).
+            step.knowledge_by_example[bundle.sample_ids[j]] <- knowledge.
+            step.generation_availability[j] <- knowledge.generation_availability if present.
+        END FOR.
+        IF training_mode: step.teacher_target <- bundle.target_od[:,horizon,:,:].
+        APPEND step to prepared.
+    END FOR.
+    RETURN prepared.
+END PROCEDURE
+
+PROCEDURE Net_0207.estimate_generation(contexts, t, t0)
+    OUTPUT Original-scale production[N], attraction[N] and availability metadata.
+    result <- {availability:empty keyed record}.
+    FOR task in [production,attraction]:
+        context <- contexts[task]; estimator <- generation_estimators[task].
+        CHECK context target/issue times, graph/transform/checkpoint IDs against t,t0 and estimator.
+        transformed_context <- COPY_CONTAINER(context).
+        FOR field in [encoder_covariates,decoder_covariates]:
+            payload <- MATERIALIZE(context[field],context's immutable store reference if needed).
+            IF payload is a record:
+                values,representation,transform_id <- payload.values,payload.representation,payload.transform_id.
+            ELSE:
+                values <- payload.
+                representation,transform_id <- context.covariate_representation,context.feature_transform_id.
+            END IF.
+            IF representation=raw: values <- estimator.feature_transform(values).
+            ELSE: CHECK representation=normalized and transform_id=estimator.feature_transform.id.
+            END IF.
+            transformed_context[field] <- values as a plain tensor.
+            transformed_context.covariate_representation <- normalized.
+            transformed_context.feature_transform_id <- estimator.feature_transform.id.
+        END FOR.
+        sequence <- RecurrentGCN_for_trip_generation.forecast_sequence(estimator,transformed_context).
+        value <- sequence.values[context.target_offset] with sequence.target_times[context.target_offset]=t.
+        value <- RESHAPE explicit singleton axes to [N].
+        IF sequence.representation=normalized: value <- estimator.target_transform.inverse(value).
+        IF cfg.generation.parameter_policy=frozen: value <- DETACH(value).
+        result[task] <- value.
+        result.availability[task] <- context's source availability and transform identities.
+    END FOR.
+    RETURN result.
+END PROCEDURE
+
+PROCEDURE Net_0207.compress_distribution(Q)
+    compressed <- empty[N,K_od].
+    FOR m=0..N-1:
+        FOR slot=0..R-1: compressed[m,slot] <- Q[m,fixed_RDS[m,slot]].
+        compressed[m,R] <- SUM(Q[m,n], n outside fixed_RDS[m,:]).
+    END FOR.
+    RETURN compressed.
+END PROCEDURE
+
+PROCEDURE Net_0207.encoder_payload(values, units, axes, knowledge, source_metadata)
+    RETURN {values,shape:SHAPE(values),units,representation_kind:raw_encoder_input,
+        target_time:knowledge.target_time,forecast_origin:knowledge.forecast_origin,
+        station_order_id:artifacts.station_order_id,RDS_id:artifacts.RDS_id,
+        availability:source_metadata.available_at if present,
+            otherwise MAX(observation/issue times in source_metadata.availability),
+        axis_order:axes,support:source_metadata.support if present, otherwise absent}.
+END PROCEDURE
+
+PROCEDURE Net_0207.build_path_context(paths, service, knowledge)
+    context <- {sample_id:knowledge.sample_id,target_time:knowledge.target_time,
+        forecast_origin:knowledge.forecast_origin,station_order_id:artifacts.station_order_id,
+        RDS_id:artifacts.RDS_id,utility_state_id:STATE_ID(utility_layer),
+        service_state_id:service.id,candidate_set_id:paths.id}.
+    INITIALIZE context.path_probabilities,context.incidence,context.line_aware_routes,
+        context.feasible_sets,context.path_status as empty keyed records.
+    path_embeddings <- empty OD-keyed record.
+    FOR m=0..N-1:
+        FOR slot=0..R-1:
+            n <- fixed_RDS[m,slot]; candidates <- paths.by_od[(m,n)].
+            P <- length(candidates.path_ids).
+            attributes <- zeros[P,Phi]; mask <- false[P]; incidence <- empty sets[P].
+            FOR p in nonpadding candidate positions:
+                route <- candidates.route[p].
+                feasible,sections,status <- evaluate_route(route,m,n,service,knowledge).
+                IF feasible:
+                    mask[p] <- true; incidence[p] <- sections.
+                    IF candidates.attributes is present:
+                        attributes[p,:] <- candidates.attributes[p,:] in the utility attribute order.
+                    ELSE:
+                        FOR phi=0..Phi-1:
+                            attributes[p,phi] <- SUM(route.section_features[omega,phi],omega in sections).
+                        END FOR.
+                    END IF.
+                    IF nonfinite(attributes[p,:]): RAISE Error(nonfinite_path_attributes,m,n,p).
+                END IF.
+                route_status[p] <- status.
+            END FOR.
+            rho <- logit_layer.forward(utility_layer.forward(attributes),mask).
+            matrix <- zeros[N,N]; feasible_ids <- empty list.
+            FOR p in nonpadding candidate positions:
+                path_id <- candidates.path_ids[p].
+                context.path_probabilities[(m,n),path_id] <- rho[p].
+                context.incidence[(m,n),path_id] <- incidence[p].
+                context.line_aware_routes[(m,n),path_id] <- candidates.route[p].
+                IF mask[p]:
+                    APPEND path_id to feasible_ids.
+                    FOR (eta,mu) in incidence[p]: matrix[eta,mu] <- matrix[eta,mu]+rho[p].
+                END IF.
+            END FOR.
+            context.feasible_sets[(m,n)] <- feasible_ids.
+            context.path_status[(m,n)] <- valid_distribution if feasible_ids is nonempty,
+                otherwise unavailable if any route_status is unknown, otherwise unassignable.
+            IF flags.traffic_assignment:
+                IF feasible_ids is empty:
+                    path_embeddings[(m,n)] <- missing_path_embedding(context.path_status[(m,n)]).
+                ELSE:
+                    encoder <- path_encoders[cfg.path.OD_to_module_id[(m,n)]].
+                    payload <- encoder_payload(matrix,probability,[section_start,section_end],knowledge,candidates.metadata).
+                    vector,_ <- materialize_encoder_input(payload,encoder.manifest).
+                    path_embeddings[(m,n)] <- encoder.encode(vector).
+                END IF.
+            END IF.
+        END FOR.
+    END FOR.
+    context.feasible_set_id <- STATE_ID(context.feasible_sets).
+    RETURN context,path_embeddings.
+END PROCEDURE
+
+PROCEDURE Net_0207.evaluate_route(route, origin, destination, service, knowledge)
+    INPUT Ordered line-aware route; service.raw_frequency[N,N,L_lines] and status masks.
+    IF route endpoints differ from (origin,destination) OR ordered connectivity is invalid:
+        RETURN false,empty_set,invalid_route.
+    END IF.
+    sections <- empty set.
+    FOR transition in route ordered transitions:
+        IF transition is transfer:
+            status <- transition's cutoff-available transfer status.
+        ELSE:
+            eta,mu,line <- transition's station and line IDs.
+            channel <- line_id_to_channel[line].
+            frequency,known <- service.raw_frequency[eta,mu,channel],service.known_status[eta,mu,channel].
+            IF NOT service.structural_support[eta,mu,channel]: RETURN false,empty_set,unassignable.
+            IF known AND (frequency<0 OR nonfinite(frequency)): RAISE Error(invalid_frequency).
+            IF known AND frequency=0: RETURN false,empty_set,unassignable.
+            status <- traversable if known, otherwise unknown.
+        END IF.
+        IF status=unknown:
+            status <- cfg.path.unavailable_input_policy(transition,knowledge.forecast_origin).
+            IF status remains unknown: RETURN false,empty_set,unknown.
+        END IF.
+        IF status is not traversable: RETURN false,empty_set,unassignable.
+        IF transition is in_vehicle: INSERT (eta,mu) into sections.
+    END FOR.
+    RETURN true,sections,traversable.
+END PROCEDURE
+
+PROCEDURE Net_0207.missing_path_embedding(status)
+    spec <- missing_path_adapter.
+    IF spec is absent: RAISE Error(missing_parameter,path_missing_feature_policy,status).
+    IF spec.mode=error: RAISE Error(unavailable_path_feature,status).
+    IF spec.mode=fixed_vector: embedding <- spec.value[status].
+    ELSE IF spec.mode=learned_vector: embedding <- registered spec.parameter[status].
+    ELSE: RAISE Error(unknown_missing_feature_adapter).
+    END IF.
+    RETURN embedding[D_path] with status and its configured feature-mask metadata.
+END PROCEDURE
+
+PROCEDURE Net_0207.build_service_features(service, knowledge)
+    OUTPUT One embedding for each fixed-order line.
+    FOR line in artifacts.line_ids:
+        channel <- line_id_to_channel[line].
+        encoder <- service_encoders[cfg.service.line_to_module_id[line]].
+        payload <- encoder_payload(service.raw_frequency[:,:,channel],trains_per_hour,[section_start,section_end],knowledge,service.metadata).
+        payload.support,payload.known_status <- service.structural_support[:,:,channel],service.known_status[:,:,channel].
+        IF service.encoder_frequency is present:
+            payload.values <- service.encoder_frequency[:,:,channel].
+            IF service.encoder_scale=normalized:
+                payload.representation_kind <- transformed_encoder_input.
+                payload.transform_id <- service.frequency_transform_id.
+            END IF.
+        END IF.
+        IF any required service entry remains unknown:
+            payload <- cfg.service.missing_policy(payload,knowledge.forecast_origin).
+            IF payload has unresolved entries: RAISE Error(unresolved_service_input,line).
+        END IF.
+        vector,_ <- materialize_encoder_input(payload,encoder.manifest).
+        embeddings[line] <- encoder.encode(vector).
+    END FOR.
+    RETURN embeddings.
+END PROCEDURE
+
+CLASS ConfiguredMLPEncoder
+    PURPOSE Evaluate a supplied Dense/activation/dropout architecture.
+    INPUT x[...,input_dim]; OUTPUT encoded[...,output_dim].
+    PARAMETERS One weight and bias per Dense layer; activation parameters where specified.
+END CLASS
+
+PROCEDURE ConfiguredMLPEncoder.__init__(spec, initializer, device)
+    required_fields <- [input_dim,widths,activations,dropout,output_dim].
+    missing <- [name for name in required_fields if spec[name] is absent].
+    IF missing is nonempty: RAISE Error(missing_parameters,missing).
+    input_dim,output_dim <- spec.input_dim,spec.output_dim.
+    widths,activations,dropout <- spec.widths,spec.activations,spec.dropout.
+    dimensions <- [input_dim] followed by spec.widths.
+    IF lengths(widths,activations,dropout) differ OR widths[-1]!=output_dim:
+        RAISE Error(incompatible_mlp_spec).
+    END IF.
+    FOR layer=0..length(widths)-1:
+        weight[layer] <- INITIALIZE([dimensions[layer+1],dimensions[layer]],initializer,device).
+        bias[layer] <- INITIALIZE([dimensions[layer+1]],initializer.bias,device).
+        REGISTER weight[layer],bias[layer] and any specified activation parameters.
+        IF dropout[layer]<0 OR dropout[layer]>=1: RAISE Error(invalid_dropout).
+    END FOR.
+    STORE spec and its fitted input_transform.
+    RETURN this encoder.
+END PROCEDURE
+
+PROCEDURE ConfiguredMLPEncoder.transform_input(payload)
+    IF payload is raw:
+        RETURN spec.input_transform(payload.values).
+    ELSE IF payload.transform_id=spec.input_transform.id:
+        RETURN payload.values.
+    ELSE:
+        RAISE Error(incompatible_transform).
+    END IF.
+END PROCEDURE
+
+PROCEDURE ConfiguredMLPEncoder.forward(x)
+    hidden <- x.
+    FOR layer=0..length(spec.widths)-1:
+        hidden <- hidden*TRANSPOSE(weight[layer])+bias[layer].
+        hidden <- spec.activations[layer](hidden,registered_activation_parameters[layer]).
+        IF training_mode AND spec.dropout[layer]>0:
+            keep <- BERNOULLI(1-spec.dropout[layer],SHAPE(hidden)).
+            hidden <- keep*hidden/(1-spec.dropout[layer]).
+        END IF.
+    END FOR.
+    RETURN hidden.
+END PROCEDURE
+
+PROCEDURE ConfiguredMLPEncoder.encode(x)
+    RETURN forward(x).
+END PROCEDURE
+
+PROCEDURE build_generic_encoder(spec, initializer, device)
+    INPUT GenericEncoderSpec with feature_schema, fitted input_transform and complete Dense layer arrays.
+    encoder <- ConfiguredMLPEncoder(spec,initializer,device).
+    RETURN encoder with output contract [N,spec.output_dim] for each sample/time.
+END PROCEDURE
+
+CLASS ConfiguredAutoencoder
+    PURPOSE Independent configurable encoder and reconstruction decoder.
+    PARAMETERS Supplied encoder_spec and decoder_spec; no implicit layer count.
+END CLASS
+
+PROCEDURE ConfiguredAutoencoder.__init__(spec, initializer, device)
+    encoder <- ConfiguredMLPEncoder(spec.encoder_spec,initializer,device).
+    decoder <- ConfiguredMLPEncoder(spec.decoder_spec,initializer,device).
+    IF encoder.output_dim!=decoder.input_dim OR decoder.output_dim!=encoder.input_dim:
+        RAISE Error(incompatible_autoencoder_shapes).
+    END IF.
+    REGISTER encoder and decoder for pretraining.
+    RETURN this autoencoder.
+END PROCEDURE
+
+PROCEDURE ConfiguredAutoencoder.encode(x)
+    RETURN encoder.forward(x).
+END PROCEDURE
+
+PROCEDURE ConfiguredAutoencoder.forward(x)
+    latent <- encode(x).
+    reconstruction <- decoder.forward(latent).
+    RETURN latent,reconstruction.
+END PROCEDURE
+
+CLASS FeatureEncoderView
+    PURPOSE Expose an autoencoder's existing encoder without its reconstruction parameters.
+    PARAMETERS Existing encoder tensors or the existing encoder module.
+END CLASS
+
+PROCEDURE FeatureEncoderView.encode(x)
+    IF kind=simple_relu: RETURN RELU(x*TRANSPOSE(encoder_weight)+encoder_bias).
+    ELSE: RETURN encoder.forward(x).
+    END IF.
+END PROCEDURE
+
+PROCEDURE make_feature_autoencoder(artifact)
+    spec <- artifact.architecture.
+    IF spec.kind=simple_relu:
+        autoencoder <- SimpleAutoencoder(spec.input_dim,spec.latent_dim,spec.initializer).
+        encoder_parameters <- references to its encoder_weight and encoder_bias.
+    ELSE IF spec.kind=configured_mlp:
+        autoencoder <- ConfiguredAutoencoder(spec,spec.initializer,spec.device).
+        encoder_parameters <- references to its encoder parameters.
+    ELSE:
+        RAISE Error(unsupported_autoencoder_architecture,spec.kind).
+    END IF.
+    IF artifact.weights is present: RESTORE matching autoencoder parameters.
+    IF spec.kind=simple_relu:
+        view <- FeatureEncoderView{kind:simple_relu,
+            encoder_weight:autoencoder.encoder_weight,encoder_bias:autoencoder.encoder_bias}.
+        input_dim <- spec.input_dim.
+    ELSE:
+        view <- FeatureEncoderView{kind:configured_mlp,encoder:autoencoder.encoder}.
+        input_dim <- spec.encoder_spec.input_dim.
+    END IF.
+    view.parameters <- encoder_parameters.
+    view.manifest <- artifact.axis_layout when present, otherwise absent during initial pretraining.
+    IF artifact.input_transform is present:
+        ADD input_dim, input_transform=artifact.input_transform,
+            input_transform_id=artifact.input_transform.id to view.manifest.
+    END IF.
+    autoencoder.encoder_view <- view.
+    RETURN autoencoder.
+END PROCEDURE
+
+CLASS OriginAdapter
+    PURPOSE Align a distribution latent representation to origin rows.
+    PARAMETERS mode, N, output_width and optional learned projection.
+END CLASS
+
+PROCEDURE build_origin_adapter(spec)
+    adapter <- OriginAdapter with spec.
+    IF spec.mode=learned_projection:
+        adapter.projection <- REGISTER ConfiguredMLPEncoder(spec.projection,spec.initializer,spec.device).
+    END IF.
+    RETURN adapter.
+END PROCEDURE
+
+PROCEDURE OriginAdapter.forward(latent)
+    IF spec.mode=row_identity:
+        result <- latent.
+    ELSE IF spec.mode=reshape:
+        result <- RESHAPE(latent,[N,spec.output_width]).
+    ELSE IF spec.mode=broadcast_global:
+        result <- REPEAT(latent,N,origin_axis).
+    ELSE IF spec.mode=learned_projection:
+        result <- RESHAPE(projection.forward(latent),[N,spec.output_width]).
+    ELSE:
+        RAISE Error(unknown_origin_alignment).
+    END IF.
+    CHECK SHAPE(result)=[N,spec.output_width].
+    RETURN result.
+END PROCEDURE
+
+PROCEDURE Net_0207.knowledge_from_example(local)
+    RETURN build_knowledge_for_step(local.target_time,local.forecast_origin,local.sample_id,
+        local.station_features,local.additional_features,local.auxiliary_context_by_task,
+        local.generic_exogenous_inputs,local.edges,local.edge_attributes,local.paths,local.service,
+        local.dynamic_impedance).
+END PROCEDURE
+
+PROCEDURE transform_and_vectorize(raw_batch, transform, axis_layout)
+    normalized <- transform(raw_batch.values).
+    ordered <- PERMUTE(normalized,axis_layout.example_axes followed by axis_layout.feature_axes).
+    RETURN COLLAPSE(ordered,only feature_axes into the final input_dim axis).
+END PROCEDURE
+
+PROCEDURE Net_0207.normalize_knowledge_records(local, source_step, sample_index)
+    INPUT Local numerical slices and their preserved source metadata.
+    IF local.dynamic_impedance is a matrix:
+        local.dynamic_impedance <- {values:local.dynamic_impedance,
+            metadata:source_step.dynamic_impedance_metadata[sample_index]}.
+    END IF.
+    IF local.service is present:
+        service <- local.service.
+        IF service.metadata is absent:
+            service.metadata <- {units:service.raw_units,line_order_id:service.line_order_id,
+                availability:service.availability,support:service.structural_support,
+                known_status:service.known_status}.
+        END IF.
+        service.id <- service.source_version if present, otherwise STATE_ID(service.metadata,service.raw_frequency).
+        local.service <- service.
+    END IF.
+    IF local.paths is present:
+        paths <- local.paths.
+        paths.id <- paths.metadata.candidate_set_id if present, otherwise STATE_ID(paths.metadata).
+        IF paths.by_od is absent:
+            paths.by_od <- empty keyed record.
+            FOR retained real OD pair od:
+                paths.by_od[od] <- {path_ids:paths.candidate_ids[od],
+                    route:paths.line_aware_routes[od],attributes:paths.attributes[od] if present,
+                    padding_mask:paths.padding_mask[od],metadata:paths.metadata}.
+            END FOR.
+        END IF.
+        FOR each od in paths.by_od:
+            candidate <- paths.by_od[od].
+            IF candidate.metadata is absent: candidate.metadata <- paths.metadata.
+            IF candidate.route is absent:
+                candidate.route[p] <- paths.line_aware_routes[od,candidate.path_ids[p]] for each p.
+            END IF.
+            paths.by_od[od] <- candidate.
+        END FOR.
+        local.paths <- paths.
+    END IF.
+    RETURN local.
+END PROCEDURE
+
+END MODULE

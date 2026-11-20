@@ -1,0 +1,437 @@
+MODULE train_evaluate_functions
+EDITION paper-aligned reconstruction; NON-EXECUTABLE PSEUDOCODE
+PURPOSE inference, original-scale metrics, run directories, and learning-rate scheduling
+PAPER Sections 4.7 and 5.1.3; Eqs. (28)-(30), (34)-(37)
+DEPENDENCIES lib/utils_CUROP.pseudo; lib/metrics.pseudo; models/Net_0207.pseudo
+
+CONTRACTS
+    Q = number of genuine samples; B = batch size; N = station count.
+    B counts rows in the current model tensor and may include padding during evaluation.
+    Q and all metric/assignment sample counts exclude rows whose sample valid_mask is false.
+    lh = input intervals; lf = forecast intervals; K = R+1 compressed destinations.
+    A sample's destination column is interpreted using its origin-specific fixed RDS.
+    ForecastBundle.od_normalized has shape [B,lf,N,K].
+    Target OD uses exactly the same station ordering, RDS and normalization manifest.
+    Prediction records carry sample_id, forecast_origin, horizon timestamp and valid_mask.
+    valid_mask identifies actual observations and excludes padding; zero demand is valid.
+    No evaluation routine fits a scaler, updates utility weights or changes a checkpoint.
+    A missing prediction is a failed evaluation, not a sample to discard silently.
+    Future decoder knowledge is available at forecast_origin; future OD labels are not.
+    Main-task output clipping is unresolved in the paper and requires a declared policy.
+    Original clipping at zero is retained only as an explicit legacy policy option.
+    All returned and saved metrics describe the SAME postprocessed prediction array.
+
+PROCEDURE run_model(model, data_iterator, num_nodes, edge_index, edge_attr,
+    device, seq_len, horizon, output_dim,
+    four_step_method_included, history_distribution_included,
+    traffic_assignment_included, depart_freq_included,
+    component_context = REQUIRED_EXPLICIT_CONTEXT)
+    INPUT model, deterministic batch iterator and graph.
+    PARAMETERS independent component context, device, sequence lengths and OD width.
+    OUTPUT ordered list of genuine PredictionRecord objects.
+    N <- num_nodes.
+    Check positive independent seq_len/horizon and output_dim=component_context.RDS.retained_count+1.
+    Compare graph station order and the supplied compatibility flags with component_context.
+    saved_modes <- {module:module.training FOR module IN model.registered_modules}.
+    prediction_records <- []; observed_sample_ids <- SET().
+    TRY:
+        Set each registered module to evaluation mode.
+        WITH inference-only gradient context:
+            FOR batch IN data_iterator:
+                B <- LENGTH(batch.sample_ids).
+                bundle <- utils.COLLATE_BATCH_RECORD(batch,N,edge_index,edge_attr,device,
+                    seq_len,horizon,component_context,return_y=true).
+                Check bundle.target_od shape [B,horizon,N,output_dim] and matching timestamp/ID metadata.
+                evaluation_labels <- {target:bundle.target_od,mask:bundle.target_observation_mask}.
+                Remove these two fields and decoder teacher_target fields from the model-facing bundle.
+                prediction <- model.forward(bundle,mode=AUTOREGRESSIVE_EVALUATION).
+                IF prediction is a legacy OD tensor:
+                    prediction <- ForecastBundle(od_normalized=prediction,assignment_outputs=ABSENT).
+                END IF
+                Check finite predictions [B,horizon,N,output_dim] and matching mapping IDs.
+                FOR b IN positions where bundle.valid_mask[b]=true:
+                    sample_id <- bundle.sample_ids[b].
+                    IF sample_id IN observed_sample_ids: RAISE DUPLICATE_SAMPLE(sample_id).
+                    record <- {sample_id:sample_id,od_normalized:DETACH_TO_CPU(prediction.od_normalized[b]),
+                        ytime:bundle.ytime[b],xtime:bundle.xtime[b],forecast_origin:bundle.forecast_origin[b],
+                        fitted_ids:bundle.fitted_ids,assignment_by_time:empty mapping}.
+                    IF component_context.path_outputs_requested OR component_context.traffic_assignment:
+                        FOR h FROM 0 TO horizon-1:
+                            assignment <- prediction.assignment_context_by_step[h][sample_id].
+                            record.assignment_by_time[assignment.target_time] <- DETACHED_COPY(assignment).
+                        END FOR
+                    END IF
+                    prediction_records.APPEND(record).
+                    observed_sample_ids.ADD(sample_id).
+                END FOR
+                Release temporary device tensors for this batch.
+            END FOR
+        END WITH
+    FINALLY:
+        FOR module,training_flag IN saved_modes:
+            module.training <- training_flag.
+        END FOR
+    END TRY
+    RETURN prediction_records.
+END PROCEDURE
+
+PROCEDURE evaluate(model, dataset, dataset_type, num_nodes, edge_index, edge_attr,
+    device, seq_Len, horizon, output_dim,
+    four_step_method_included, history_distribution_included,
+    traffic_assignment_included, depart_freq_included,
+    logger, detail = true, cfg = REQUIRED, format_result = false,
+    return_predictions = false)
+    INPUT model, dataset, dataset_type, edge_index, edge_attr, logger.
+    PARAMETERS num_nodes, device, seq_Len, horizon, output_dim, four_step_method_included,
+        history_distribution_included, traffic_assignment_included, depart_freq_included, detail = true, cfg =
+        REQUIRED, format_result = false, return_predictions = false.
+    OUTPUT EvaluationResult with sample identities, per-horizon metrics and optional prediction arrays.
+    REQUIRE dataset_type is train, val or test.
+    REQUIRE cfg is present; do not dereference an optional None configuration.
+    Verify cfg.model.horizon = horizon and cfg.model.seq_len = seq_Len.
+    PHASE 1: Select the checkpoint context and deterministic input order.
+    component_context <- dataset.component_context.
+    checkpoint <- component_context.checkpoint_manifest.
+    IF checkpoint.artifact_role='live_training_state':
+        REQUIRE dataset_type is train or val and checkpoint.persisted_checkpoint=false.
+        Validate its current model digest and fixed-artifact IDs; label exports with its live-state ID.
+    END IF
+    REQUIRE dataset.expected_counts[dataset_type], dataset.targets_by_id[dataset_type]
+        and dataset.split_sample_order[dataset_type] to exist.
+    Validate dataset manifest against checkpoint manifest before inference.
+    IF detail: log evaluation start with split and checkpoint hash.
+    Start elapsed-time measurement.
+    iterator <- dataset.loaders[dataset_type].get_iterator(order='canonical').
+    This deterministic read-only view does not mutate the training sampler or stored sample order.
+    records <- run_model(model=model, data_iterator=iterator, num_nodes=num_nodes,
+        edge_index=edge_index, edge_attr=edge_attr, device=device,
+        seq_len=seq_Len, horizon=horizon, output_dim=output_dim,
+        four_step_method_included=four_step_method_included,
+        history_distribution_included=history_distribution_included,
+        traffic_assignment_included=traffic_assignment_included,
+        depart_freq_included=depart_freq_included,
+        component_context=component_context).
+    PHASE 2: Join predictions and exact target counts by ID and time.
+    truth_records <- dataset.targets_by_id[dataset_type].
+    predicted_ids <- [record.sample_id FOR record IN records].
+    REQUIRE SET(predicted_ids)=SET(KEYS(truth_records)).
+    REQUIRE each genuine expected sample occurs exactly once.
+    record_by_id <- {record.sample_id:record FOR record IN records}.
+    records <- [record_by_id[id] FOR id IN dataset.split_sample_order[dataset_type]].
+    Reject missing/extra predictions; never use min(prediction_count,truth_count).
+    Q <- length(records); N <- num_nodes.
+    y_normalized <- stack records.od_normalized as [Q,horizon,N,output_dim].
+    ordered_target_times <- stack each ordered record.ytime as [Q,horizon].
+    ordered_forecast_origins <- the matching ordered record.forecast_origin values.
+    FOR each ordered prediction record q:
+        Resolve its sample_id in truth_records and use record.ytime as the exact horizon timestamp list.
+        Locate each forecast timestamp once in the truth record's original ytime sequence.
+        Reject missing, duplicated or differently spaced target timestamps.
+        Gather that sample's normalized labels and observation mask using those target indices.
+        Gather its immutable raw_target_count using the identical indices.
+    END FOR
+    y_true_normalized <- stack the selected truth arrays as [Q,horizon,N,output_dim].
+    valid_mask <- stack the identically selected target observation masks with the same shape.
+    Exclude padded rows before this join; legitimate observed zero-demand cells stay valid.
+    REQUIRE Q equals dataset.expected_counts[dataset_type].
+    PHASE 3: Restore flow units and apply the saved output policy.
+    scaler <- dataset.frozen_train_scaler.
+    Verify scaler ID equals checkpoint.transform_id.
+    y_raw <- scaler.inverse_transform(y_normalized).
+    y_truth_inverse <- scaler.inverse_transform(y_true_normalized).
+    y_truth <- stack the gathered raw_target_count arrays in identical order.
+    REQUIRE y_truth_inverse agrees with y_truth under the recorded transform-roundtrip tolerance.
+    Use the exact observed count array as canonical truth so floating roundoff cannot erase zero-flow instances.
+    Verify inverse transform broadcasts along recorded feature axes only.
+    REQUIRE finite y_raw and nonnegative observed count targets.
+    policy <- cfg.evaluation.output_nonnegativity_policy.
+    zero_total_policy <- cfg.evaluation.wmape_zero_total_policy.
+    REQUIRE a declared zero_total_policy accepted by lib.metrics.masked_mape_np.
+    IF policy is unspecified:
+        Stop claiming a reproducible numeric evaluation; request a declared setting.
+    ELSE IF policy = none:
+        y_evaluated <- y_raw.
+    ELSE IF policy = legacy_clip_zero:
+        y_evaluated <- elementwise maximum(y_raw,0).
+        Record number/fraction of clipped cells and explicitly label the legacy choice.
+    ELSE IF policy = model_constrained_nonnegative:
+        REQUIRE output architecture contract guarantees original-scale nonnegativity.
+        Verify within declared numerical tolerance; do not clip unexplained violations.
+        y_evaluated <- y_raw.
+    ELSE:
+        Apply only an explicitly documented and versioned output policy.
+    END IF
+    PHASE 4: Calculate metrics per horizon, then average.
+    per_horizon_metrics <- [].
+    FOR h from 0 through horizon-1:
+        truth_h <- y_truth[:,h,:,:].
+        pred_h <- y_evaluated[:,h,:,:].
+        mask_h <- valid_mask[:,h,:,:].
+        Keep zero-demand cells in the mask.
+        mae_h <- masked_mae_np(pred_h,truth_h,valid_mask=mask_h).
+        rmse_h <- masked_rmse_np(pred_h,truth_h,valid_mask=mask_h).
+        wmape_ratio_h <- masked_mape_np(pred_h,truth_h,valid_mask=mask_h,
+            zero_total_policy=zero_total_policy).
+        wmape_percent_h <- 100 * wmape_ratio_h, if ratio is defined.
+        Record h+1, lead_time_minutes, valid_count and all three metrics.
+        Record WMAPE numerator and denominator to make aggregation auditable.
+        IF detail:
+            Log MAE, RMSE and WMAPE with an explicit percent unit.
+    END FOR
+    Initialize results as an empty EvaluationResult record.
+    FOR metric in [MAE,RMSE,WMAPE_percent]:
+        Collect exactly horizon per-step values, including any undefined statuses.
+        IF any value is undefined:
+            Apply cfg.evaluation.undefined_horizon_policy: fail, or mark that aggregate undefined with reasons.
+            Return an undefined aggregate when any required horizon is undefined, according to the selected policy.
+        ELSE store arithmetic mean(values) under results[metric + '_od'].
+    END FOR
+    results.sample_count <- Q.
+    results.sample_ids <- dataset.split_sample_order[dataset_type].
+    results.MAPE_net_od <- results.WMAPE_percent_od / 100 when defined; otherwise the same undefined status.
+    Label MAPE_net_od as compatibility name for weighted percentage error ratio.
+    results.per_horizon_metrics <- per_horizon_metrics; results.split <- dataset_type.
+    results.checkpoint_id <- checkpoint.id; results.scaler_id <- scaler.transform_id.
+    results.RDS_id <- component_context.RDS_id; results.output_policy <- policy.
+    results.forecast_origin <- ordered_forecast_origins; results.ytime <- ordered_target_times.
+    results.interval_duration <- cfg.data.interval_duration; results.scale <- 'passenger_count'.
+    results.transform_receipt <- {transform_id:scaler.transform_id,inverse_applied:true,output_policy:policy}.
+    PHASE 5: Attach requested diagnostics and output arrays.
+    IF cfg.evaluation.segmented_analysis_enabled:
+        IF cfg.segments.membership_artifact is supplied:
+            segment_definition <- read and verify that immutable membership and its grouping provenance.
+        ELSE:
+            REQUIRE cfg.segments.grouping_population='evaluated_split' for this in-place builder.
+            segment_definition <- BUILD_FLOW_SEGMENTS(y_truth,valid_mask,results.sample_ids,
+                ordered_target_times,component_context.RDS,protocol=cfg.segments).
+            For another grouping population, require its prebuilt verified membership artifact instead of silently substituting this split.
+        END IF
+        Attach SEGMENTED_EVALUATION(y_evaluated,y_truth,valid_mask,segment_definition,
+            component_context.RDS,cfg.evaluation).
+    END IF
+    IF assignment records are requested:
+        Attach ASSIGNMENT_SUMMARIES(records,y_evaluated,results.sample_ids,ordered_target_times,
+            component_context.RDS,cfg.assignment,policy).
+    END IF
+    IF format_result:
+        Print rows with MAE, RMSE and WMAPE percent in documented order.
+        Still return the structured results; formatting must not suppress a return value.
+    END IF
+    IF return_predictions:
+        results.prediction_records <- records.
+        results.y_evaluated <- y_evaluated; results.y_raw <- y_raw.
+        results.y_truth <- y_truth; results.valid_mask <- valid_mask.
+        results.prediction_mask <- IS_FINITE(y_evaluated), independently of the truth observation mask.
+        IF component_context.path_outputs_requested OR component_context.traffic_assignment:
+            results.assignment_context_by_step <- empty horizon-indexed mapping.
+            FOR h FROM 0 TO horizon-1:
+                FOR record IN records:
+                    results.assignment_context_by_step[h][record.sample_id] <-
+                        record.assignment_by_time[record.ytime[h]].
+                END FOR
+            END FOR
+        END IF
+    END IF
+    IF detail: log evaluation end, elapsed time and genuine sample count.
+    RETURN results.
+END PROCEDURE
+
+PROCEDURE _get_log_dir(kwargs,purpose='training',resume_run_id=ABSENT)
+    INPUT kwargs, purpose='training', resume_run_id=ABSENT.
+    PARAMETERS None.
+    OUTPUT absolute run output directory.
+    REQUIRE purpose is training or evaluation; kwargs.base_dir is the declared output root.
+    configured <- kwargs.train.log_dir if purpose=training and present,
+        otherwise kwargs.evaluation.log_dir if purpose=evaluation and present, otherwise ABSENT.
+    IF configured is present:
+        candidate <- resolve configured against explicitly supplied run root.
+    ELSE:
+        IF purpose=training:
+            learning_rate <- kwargs.train.base_lr; batch_size <- kwargs.data.batch_size.
+            rnn_units <- kwargs.model.rnn_units; num_layers <- kwargs.model.num_rnn_layers.
+            REQUIRE positive batch size, learning rate, layer count and layer widths.
+            IF rnn_units is scalar: layer_widths <- repeat rnn_units exactly num_layers times.
+            ELSE layer_widths <- rnn_units; require length(layer_widths)=num_layers.
+            structure <- join layer_widths using '-'.
+            descriptive_id <- 'KNOWCAST_' + structure + learning_rate + batch_size.
+        ELSE descriptive_id <- 'KNOWCAST_evaluation'.
+        Evaluation naming must not require train.base_lr or any optimizer configuration.
+        unique_id <- UTC timestamp with subsecond precision + collision-resistant run ID.
+        candidate <- kwargs.base_dir / descriptive_id + unique_id.
+    END IF
+    Validate candidate stays inside the declared output root.
+    IF candidate exists and is nonempty:
+        Permit reuse only for purpose=training with explicit resume_run_id matching the existing run manifest.
+        Otherwise allocate a new suffixed directory and record the parent experiment ID.
+    Create directory atomically, including required parent directories.
+    RETURN absolute candidate path.
+END PROCEDURE
+
+CLASS StepLR2
+    Compatibility scheduler for the legacy minimum-clamped MultiStepLR.
+    Paper does not identify this as its recovered training schedule.
+    Use only when a future implementation configuration explicitly selects it.
+    State includes optimizer reference, milestone multiset, gamma, min_lr and epoch.
+    Persist scheduler state with a resumable training checkpoint.
+
+PROCEDURE StepLR2.__init__(optimizer, milestones, gamma = 0.1, last_epoch = -1,
+    min_lr = 2.0e-6)
+    INPUT optimizer.
+    PARAMETERS milestones, gamma = 0.1, last_epoch = -1, min_lr = 2.0e-6.
+    OUTPUT initialized scheduler with restored epoch and base group rates.
+        REQUIRE optimizer has at least one learning-rate parameter group.
+        REQUIRE integer milestones in sorted nondecreasing order.
+        REQUIRE 0 < gamma <= 1 and min_lr >= 0.
+        Interpret duplicate milestones as repeated factors, or reject them by policy.
+        Preserve supplied last_epoch in the underlying scheduler initialization.
+        Store base group rates and explicit step timing (end-of-epoch or other declaration).
+        Restore all state for resume; do not recreate a fresh decay curve accidentally.
+END PROCEDURE
+
+PROCEDURE StepLR2.get_lr()
+    INPUT current object state.
+    PARAMETERS None.
+    OUTPUT one proposed learning rate per optimizer parameter group.
+        Obtain proposed group rates from the declared MultiStepLR epoch convention.
+        FOR each optimizer parameter group:
+            result[group] <- maximum(min_lr, proposed_rate[group]).
+        RETURN a rate list of exactly the optimizer group count.
+        The method reads schedule state; it does not advance the epoch itself.
+END PROCEDURE
+END CLASS
+
+PROCEDURE BUILD_FLOW_SEGMENTS(truth,mask,sample_ids,target_times,RDS,protocol)
+    INPUT truth, mask, sample_ids, target_times, RDS, protocol.
+    PARAMETERS None.
+    OUTPUT Head/Body/Tail membership and grouping provenance.
+    REQUIRE original-scale nonnegative truth [Q,horizon,N,K], masks and aligned sample/target identities.
+    REQUIRE protocol names the population, split/time range and retained real OD pairs used for grouping.
+    Exclude the compressed residual slot from named physical OD groups; report it separately if requested.
+    REQUIRE a declared repeated-target policy before summing passenger mass.
+    IF protocol.repeated_targets='unique_observed_time':
+        FOR each physical OD and actual target time, verify repeated truth values agree and count once.
+        Preserve the forecast records separately for per-horizon metric calculation.
+    ELSE IF protocol.repeated_targets='forecast_target_multiset':
+        Count each declared (sample_id,horizon,target_time) once and record its target-time multiplicity.
+    ELSE reject the missing/unknown policy; the paper does not disclose this implementation detail.
+    FOR each eligible real OD pair, compute its total observed passenger count over that declared population.
+    Track missing observations and require the protocol's minimum-coverage treatment before ranking pairs.
+    total_flow <- sum of eligible OD totals; if zero, return UNDEFINED('no positive grouping mass').
+    Sort OD pairs by total flow descending using a declared deterministic tie order.
+    cumulative[j] <- sum of the first j OD totals / total_flow, with cumulative[0]=0.
+    Paper Fig.11 uses passenger-flow thresholds 0.30 and 0.80, not percentiles of OD-pair counts.
+    REQUIRE protocol.boundary_rule in {first_cumulative_ge,last_cumulative_le}:
+        first_cumulative_ge chooses the first j whose cumulative[j] reaches/exceeds the threshold.
+        last_cumulative_le chooses the last j whose cumulative[j] does not exceed the threshold.
+    REQUIRE a separate tie rule: stable-ID splitting, or keep equal-volume ties together by moving
+        each boundary to the explicitly declared start/end of its equal-volume block.
+    Apply the same boundary/tie rule to both thresholds and verify 0<=j30<=j80<=number_of_pairs.
+    Head <- first j30 pairs; Body <- next j80-j30 pairs; Tail <- all remaining pairs.
+    Whole OD pairs remain disjoint; never split one OD's time cells to hit a flow percentage exactly.
+    Report achieved passenger-flow fractions and OD-count fractions, including empty groups.
+    The reported 6.2%,37.5%,56.3% OD-count fractions are historical outcomes, not enforced cutoffs.
+    Preserve ranking population, boundary/tie/repeat rules and immutable membership as the segment definition.
+    Store the supplied boundary, tie and repeated-target rules with the resulting membership.
+    RETURN the membership mapping, pair counts, realized flow shares and provenance.
+END PROCEDURE
+
+PROCEDURE SEGMENTED_EVALUATION(pred,truth,mask,segment_definition,RDS,metric_policy)
+    INPUT pred, truth, mask, segment_definition, RDS.
+    PARAMETERS metric_policy.
+    OUTPUT per-group/per-horizon metrics and zero-flow statistics.
+    REQUIRE segment membership rule, flow-scale definition and boundaries are stored.
+    For the paper's Head/Body/Tail analysis, require a definition produced by BUILD_FLOW_SEGMENTS
+        or an externally verified equivalent with flow thresholds 30%/80% and the same provenance.
+    Resolve station/OD IDs through the supplied training-frozen RDS.
+    REQUIRE prediction/truth/mask shapes [Q,horizon,N,K] and mapping IDs agree.
+    Do not classify residual columns as named physical destinations.
+    Initialize ordered segment_records.
+    FOR each declared disjoint segment:
+        segment_mask <- mask AND segment membership.
+        Record number of OD pairs and number of evaluated OD-time cells.
+        IF no valid cells:
+            Append this segment with undefined metrics and reason 'empty segment'.
+            Continue to the next segment; do not suppress later nonempty segments.
+        ELSE:
+            FOR each horizon h:
+                Compute masked_mae_np(pred[:,h],truth[:,h],valid_mask=segment_mask[:,h]).
+                Compute masked_rmse_np(pred[:,h],truth[:,h],valid_mask=segment_mask[:,h]).
+                Compute masked_mape_np(pred[:,h],truth[:,h],valid_mask=segment_mask[:,h],
+                    zero_total_policy=metric_policy.wmape_zero_total_policy).
+                Compute lib.metrics.segmented_smape(pred[:,h],truth[:,h],valid_mask=segment_mask[:,h],epsilon=0.000001).
+                Keep every horizon's valid count and defined/undefined metric status.
+                zero_mask_h <- segment_mask[:,h] AND (truth[:,h]=0).
+                zero_count_h <- count(zero_mask_h).
+                IF zero_count_h>0:
+                    zero_mean_prediction_h <- sum(pred[:,h] at zero_mask_h)/zero_count_h.
+                    zero_max_abs_prediction_h <- max(abs(pred[:,h] at zero_mask_h)).
+                ELSE mark both statistics undefined with reason 'no zero-truth observations'.
+                Retain signed mean prediction and maximum absolute prediction as distinct quantities.
+            END FOR
+            Average each metric across exactly horizon entries using metric_policy.undefined_horizon_policy.
+            Keep WMAPE and SMAPE percent/ratio labels explicit and do not pool their denominators.
+            Store boundaries and whether membership was fitted on training data.
+            For an overall zero-flow diagnostic retain the sum of per-horizon zero counts,
+                the count-weighted mean prediction and maximum of the defined per-horizon maxima.
+            Label this a forecast-record aggregate and preserve repeated-target multiplicity.
+            IF unique-time diagnostics are requested, apply the declared horizon-selection policy first,
+                rather than deduplicating predictions from different forecast horizons arbitrarily.
+            Append the segment record even when a horizon-level metric is undefined.
+        END IF
+    END FOR
+    Preserve aggregate results separately from segmented diagnostics.
+    RETURN segment records.
+END PROCEDURE
+
+PROCEDURE ASSIGNMENT_SUMMARIES(records,evaluated_od,sample_ids,target_times,
+    RDS,assignment_config,output_policy)
+    INPUT records, evaluated_od, sample_ids, target_times, RDS, assignment_config.
+    PARAMETERS output_policy.
+    OUTPUT path/section flows, unassigned-flow statuses and horizon averages.
+    REQUIRE evaluated_od shape [Q,horizon,N,R+1] in original flow units.
+    REQUIRE sample_ids and target_times identify exactly these evaluated OD rows and horizons.
+    REQUIRE output_policy equals the main evaluation/export policy; do not clip or inverse-transform again.
+    Join records by sample_id and target_time, rejecting missing, duplicate or mismatched assignment metadata.
+    record_by_id <- a unique mapping from each genuine record.sample_id to that record.
+    Initialize all path_flow and section_flow accumulators to zero with explicit axis manifests.
+    Initialize unassigned_retained_flow and assignment_status records for every OD/time.
+    FOR each forecast origin q and horizon h:
+        context <- record_by_id[sample_ids[q]].assignment_by_time[target_times[q,h]].
+        REQUIRE context.target_time,forecast_origin,sample_id and RDS_id match the evaluated row.
+        REQUIRE path IDs, probabilities, incidence and line_aware_routes share its feasible-set version.
+        context.incidence[(o,d),path_id] is the set of distinct directed physical sections for that path.
+        This sparse set is binary incidence; line-specific service metadata remains in line_aware_routes.
+        FOR each origin o and retained slot k in [0,R):
+            d <- RDS[o,k]; q_od <- evaluated_od[q,h,o,k].
+            REQUIRE finite q_od; the residual slot R is never mapped to a physical destination.
+            IF q_od is negative:
+                Apply the declared physical-assignment policy: fail or mark this assignment unavailable.
+                Keep evaluated_od unchanged and record the affected amount; do not manufacture nonnegative flow.
+                Continue this pair only when the unavailable-status policy was selected.
+            END IF
+            feasible <- context.feasible_sets[(o,d)].
+            IF feasible is empty:
+                Apply the declared empty-set policy: fail or record explicit unassignable status.
+                IF recording status, set unassigned_retained_flow[q,h,o,d] <- q_od and continue this pair.
+            END IF
+            rho <- mapping p -> context.path_probabilities[(o,d),p] for every p in feasible.
+            Reject missing tuple keys; canonical probabilities are keyed by ((o,d),path_id), not nested OD maps.
+            REQUIRE finite nonnegative rho and sum(rho)=1 within the declared tolerance.
+            FOR each feasible path ID p:
+                path_flow[q,h,o,d,p] <- q_od * rho[p].
+                FOR each distinct directed physical section s in context.incidence[(o,d),p]:
+                    REQUIRE s belongs to the declared physical-section axis.
+                    section_flow[q,h,s] += path_flow[q,h,o,d,p].
+                END FOR
+            END FOR
+            Check sum_p path_flow = q_od for nonempty feasible sets.
+        END FOR
+    END FOR
+    FOR each horizon h separately:
+        average_section_flow[h,s] <- mean over forecast origins q of section_flow[q,h,s].
+        Report unassignable amounts and whether this average is incomplete; never describe missing routes as zero truth.
+    END FOR
+    Keep horizon averages distinct from chronological aggregation of overlapping forecasts.
+    RETURN per-origin/per-horizon path and section arrays, unassigned amounts/statuses and Eq. (30) averages.
+    Operational train-load comparison requires a separately declared alignment protocol.
+END PROCEDURE

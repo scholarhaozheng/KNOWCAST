@@ -1,0 +1,564 @@
+MODULE experiments.operational_load_assessment
+PURPOSE Convert retained-OD forecasts to section flows and compare aligned train loads.
+PAPER Eqs. (28)-(30); Section 5.5; Table 8.
+CONTRACT specs/interface_contracts.md; specs/implementation_parameters.md
+
+RECORDS
+    ForecastView: prediction_counts[B,H,N,K], sample_ids, target_times, forecast_origins,
+                  prediction_mask, checkpoint_id, RDS_id, output_policy, interval_duration,
+                  scale=passenger_count, transform_receipt.
+    Context[h][sample_id]: path_probabilities[(o,d),path_id], feasible_sets[(o,d)],
+                           incidence[(o,d),path_id], line_aware_routes[(o,d),path_id].
+    Contribution: sample_id, h, o, d, path_id, section, line, direction, hops,
+                  entry_interval, forecast_origin, mass, raw_mass.
+    Observation: observation_id, time, section, line, direction, train_id,
+                 carriage_id, count, quality.
+    All section identities are directed; retained slots are 0..R-1 and residual slot is R.
+
+PROCEDURE build_operational_forecast_view(evaluation, prediction_records, manifests, protocol)
+    INPUT EvaluationResult exported with return_predictions=true and its PredictionRecords.
+    OUTPUT {view, contexts, forecast_identity} for the operational pipeline.
+    [B,H,N,K] <- SHAPE(evaluation.y_evaluated)
+    ASSERT B=evaluation.sample_count AND B=LENGTH(evaluation.sample_ids)
+    ASSERT protocol.interval_duration=evaluation.interval_duration
+    records <- UNIQUE_INDEX(prediction_records,sample_id)
+    ASSERT SET(records.keys)=SET(evaluation.sample_ids)
+    contexts <- {h:{} FOR h IN 0..H-1}
+    FOR b IN 0..B-1:
+        id <- evaluation.sample_ids[b]
+        record <- records[id]
+        MATCH record.fitted_ids with manifests.model_inputs
+        MATCH record.forecast_origin and record.ytime with evaluation rows b
+        FOR h IN 0..H-1:
+            target <- evaluation.ytime[b,h]
+            contexts[h][id] <- record.assignment_by_time[target]
+            MATCH contexts[h][id].target_time with target
+        END FOR
+    END FOR
+    # Genuine prediction rows are separate from the truth-observation mask used for metrics.
+    prediction_mask <- IS_FINITE(evaluation.y_evaluated)
+    view <- {
+        prediction_counts:evaluation.y_evaluated,prediction_mask:prediction_mask,
+        sample_ids:evaluation.sample_ids,target_times:evaluation.ytime,
+        forecast_origins:evaluation.forecast_origin,checkpoint_id:evaluation.checkpoint_id,
+        RDS_id:evaluation.RDS_id,output_policy:evaluation.output_policy,
+        interval_duration:evaluation.interval_duration,scale:passenger_count,
+        transform_receipt:evaluation.transform_receipt
+    }
+    identity <- {checkpoint_id:view.checkpoint_id,sample_ids:view.sample_ids,
+                 target_times:view.target_times,RDS_id:view.RDS_id,output_policy:view.output_policy}
+    RETURN {view:view,contexts:contexts,forecast_identity:identity}
+END PROCEDURE
+
+PROCEDURE define_operational_protocol(sampling_dates, station_aliases, observations, options)
+    OUTPUT Protocol with sampling, calibration, trajectory and matching settings.
+    times <- [07:15,08:00,08:45,09:30,10:15,11:00,16:30,
+              17:15,18:00,18:45,19:30,20:15,21:00,22:30]
+    sections <- [
+        ("JL","M","1"),("SRS","SJ","2"),("SW","S","3"),
+        ("H","Q","4"),("N","X","5")
+    ]
+    protocol <- COPY(options)
+    protocol.sections <- RESOLVE_ALIASES(sections,station_aliases)
+    protocol.sampling_grid <- PRODUCT(sampling_dates,times,protocol.sections)
+    IF options.paper_sampling_design:
+        ASSERT COUNT(sampling_dates)=10 AND INCLUDES_WEEKEND(sampling_dates)
+    END IF
+    protocol.coverage <- JOIN_GRID_WITH_OBSERVATIONS(protocol.sampling_grid,observations)
+    protocol.unobserved_cells <- protocol.coverage.missing
+    ASSERT DISJOINT(options.calibration_ids,options.evaluation_ids)
+    REQUIRE options supplies horizon policy, matching tolerance and interpolation rule
+    RETURN protocol
+END PROCEDURE
+
+PROCEDURE validate_forecast_assignment_inputs(bundle, view, contexts, manifests, policy)
+    OUTPUT AssignmentInputs {od, valid, contexts, view, exclusions}.
+    MATCH bundle and view checkpoint, sample, target-time, RDS and output-policy identities
+    REQUIRE view.scale=passenger_count
+    MATCH view.transform_receipt.transform_id with manifests.OD_transform.id
+    od <- COPY(view.prediction_counts)
+    valid <- COPY(view.prediction_mask for retained OD slots)
+    exclusions <- []
+    FOR (b,h,o,s) WHERE valid[b,h,o,s]:
+        d <- manifests.RDS[o,s]
+        context <- contexts[h][view.sample_ids[b]]
+        MATCH context sample_id, forecast_origin, target_time and RDS_id with view[b,h]
+        ASSERT all context availability records are <= view.forecast_origins[b]
+        ASSERT FINITE(od[b,h,o,s])
+        IF od[b,h,o,s] < 0:
+            IF policy.negative_flow=reject:
+                RETURN Failure(negative_flow,b,h,o,d)
+            ELSE IF policy.negative_flow=exclude:
+                valid[b,h,o,s] <- false
+                APPEND {key:(b,h,o,d),amount:od[b,h,o,s],reason:negative_flow} TO exclusions
+            ELSE:
+                before <- od[b,h,o,s]
+                od[b,h,o,s] <- policy.project(before)
+                ASSERT FINITE(od[b,h,o,s]) AND od[b,h,o,s]>=0
+                APPEND {key:(b,h,o,d),before:before,after:od[b,h,o,s],
+                        reason:operational_projection} TO exclusions
+            END IF
+        END IF
+        paths <- context.feasible_sets[(o,d)]
+        IF paths is nonempty:
+            rho <- [context.path_probabilities[(o,d),p] FOR p IN paths]
+            ASSERT every rho>=0 AND ABS(SUM(rho)-1)<=policy.probability_tolerance
+            ASSERT paths and incidence share the same candidate/feasible-set identity
+        END IF
+    END FOR
+    RETURN {od:od,valid:valid,contexts:contexts,view:view,exclusions:exclusions}
+END PROCEDURE
+
+PROCEDURE construct_retained_assignment(checked, RDS, section_axis, hop_definition)
+    OUTPUT AssignmentResult with path flows, section flows, contributions and coverage.
+    [B,H,N,K] <- SHAPE(checked.od)
+    R <- K-1
+    PathFlow <- {}
+    LinkFlow <- ZEROS(B,H,LENGTH(section_axis))
+    contributions <- []
+    coverage <- COMPLETE_RECORDS(B,H)
+    unassigned <- []
+    FOR b IN 0..B-1:
+        FOR h IN 0..H-1:
+            context <- checked.contexts[h][checked.view.sample_ids[b]]
+            FOR o IN 0..N-1:
+                FOR s IN 0..R-1:
+                    d <- RDS[o,s]
+                    IF NOT checked.valid[b,h,o,s]:
+                        coverage[b,h].complete <- false
+                        CONTINUE
+                    END IF
+                    demand <- checked.od[b,h,o,s]
+                    paths <- context.feasible_sets[(o,d)]
+                    IF paths is empty:
+                        APPEND {sample:b,h:h,o:o,d:d,amount:demand} TO unassigned
+                        IF demand>0:
+                            coverage[b,h].complete <- false
+                        END IF
+                        CONTINUE
+                    END IF
+                    path_total <- 0
+                    FOR p IN paths:
+                        q <- demand*context.path_probabilities[(o,d),p]
+                        PathFlow[(b,h,o,d,p)] <- q
+                        path_total <- path_total+q
+                        route <- context.line_aware_routes[(o,d),p]
+                        FOR section IN context.incidence[(o,d),p]:
+                            ASSERT section IN section_axis
+                            traversal <- UNIQUE_PHYSICAL_TRAVERSAL(route,section)
+                            hops <- hop_definition(route,traversal)
+                            LinkFlow[b,h,section] <- LinkFlow[b,h,section]+q
+                            APPEND {
+                                sample_id:checked.view.sample_ids[b],h:h,o:o,d:d,path_id:p,
+                                section:section,line:traversal.line,direction:traversal.direction,
+                                hops:hops,entry_interval:[checked.view.target_times[b,h],
+                                    checked.view.target_times[b,h]+checked.view.interval_duration),
+                                forecast_origin:checked.view.forecast_origins[b],mass:q,raw_mass:q
+                            } TO contributions
+                        END FOR
+                    END FOR
+                    ASSERT CLOSE(path_total,demand)
+                END FOR
+            END FOR
+        END FOR
+    END FOR
+    RETURN {PathFlow:PathFlow,LinkFlow:LinkFlow,contributions:contributions,
+            coverage:coverage,unassigned:unassigned,exclusions:checked.exclusions,
+            sample_ids:checked.view.sample_ids,horizons:0..H-1}
+END PROCEDURE
+
+PROCEDURE summarize_spatial_assignment(assignment, origin_ids, coordinates, policy)
+    OUTPUT horizon maps and the largest 33 nonzero directed-section links.
+    IF origin_ids is empty:
+        RETURN Empty(no_evaluation_origins)
+    END IF
+    indices <- LOOKUP_INDICES(assignment.sample_ids,origin_ids)
+    IF policy.coverage=complete AND ANY_INCOMPLETE(assignment.coverage[indices]):
+        RETURN Pending(["complete assignment coverage"])
+    END IF
+    mean_section <- {}
+    FOR h IN assignment.horizons:
+        mean_section[h,:] <- SUM(assignment.LinkFlow[indices,h,:],axis=forecast_origin)/COUNT(indices)
+    END FOR
+    selected <- policy.sankey.select_forecast_records(assignment.LinkFlow,indices)
+    cumulative <- SUM(selected,axis=forecast_record)
+    links <- TOP_K(positive directed entries of cumulative,k=33,ties=policy.sankey.tie_rule)
+    RETURN {mean_section:mean_section,links:links,coordinates:coordinates,
+            horizon_policy:policy.sankey,coverage:assignment.coverage,
+            unassigned:assignment.unassigned}
+END PROCEDURE
+
+PROCEDURE derive_train_level_observations(annotations, calibration, protocol)
+    OUTPUT expanded observations and count/expansion metadata.
+    rows <- RESOLVE_DUPLICATE_ANNOTATIONS(annotations,protocol.annotation_rule)
+    expanded <- []
+    FOR row IN rows:
+        IF row.quality != valid:
+            APPEND row.with_status(missing_observation) TO expanded
+            CONTINUE
+        END IF
+        ASSERT FINITE(row.count) AND row.count>=0
+        mapping <- calibration.lookup(row.section,row.line,row.direction,row.service_period)
+        IF mapping is absent:
+            RETURN Pending(["carriage expansion",row.observation_id])
+        END IF
+        IF mapping.kind=multiplicative:
+            train_count <- mapping.factor*row.count
+        ELSE:
+            train_count <- mapping.apply(row.count,row.metadata)
+        END IF
+        ASSERT FINITE(train_count) AND train_count>=0
+        APPEND row.with_fields(train_count=train_count,raw_carriage_count=row.count,
+            expansion_id=mapping.id,uncertainty=mapping.uncertainty) TO expanded
+    END FOR
+    RETURN expanded
+END PROCEDURE
+
+PROCEDURE compensate_nonretained_volume(contributions, residual_metadata, specification)
+    OUTPUT compensated contributions and unresolved-support records.
+    output <- []
+    unresolved <- []
+    groups <- GROUP_BY(contributions,specification.group_keys)
+    FOR key IN UNION(groups.keys,residual_metadata.group_keys):
+        # Group keys retain section, line, direction and the selected entry-time/origin scope.
+        group <- groups.get(key,[])
+        retained <- SUM(group.mass)
+        evidence <- residual_metadata.lookup(key)
+        IF evidence is absent:
+            RETURN Pending(["residual compensation evidence",key])
+        END IF
+        IF retained=0 AND evidence.omitted_demand>0:
+            APPEND {key:key,omitted:evidence.omitted_demand} TO unresolved
+            CONTINUE
+        END IF
+        IF retained=0:
+            CONTINUE
+        END IF
+        factor <- specification.factor(key,evidence,specification.calibration)
+        ASSERT FINITE(factor) AND factor>=0
+        FOR item IN group:
+            APPEND item.with_fields(mass=item.mass*factor,retained_mass=item.mass,
+                                    compensation_id=specification.id) TO output
+        END FOR
+    END FOR
+    RETURN {contributions:output,unresolved:unresolved,specification:specification.id}
+END PROCEDURE
+
+PROCEDURE assemble_entry_cohort_series(compensated, mode, coverage_manifest)
+    OUTPUT separate trajectories with nonduplicated entry cohorts.
+    trajectories <- {}
+    records <- INDEX_FORECAST_RECORDS(compensated.contributions+compensated.assignment_gaps)
+    IF mode.kind=fixed_horizon_sweep:
+        FOR h IN mode.horizons:
+            candidates <- FILTER(records,h=h)
+            selected <- SELECT_ONE_FORECAST_PER_ENTRY_TIME(candidates,mode.duplicate_policy)
+            trajectories[h] <- {id:h,group:h,
+                forecast_keys:SET((r.sample_id,r.h) FOR r IN selected),
+                contributions:GATHER_CONTRIBUTIONS(compensated.contributions,selected)}
+        END FOR
+    ELSE IF mode.kind=single_forecast_origin:
+        selected <- FILTER(records,forecast_origin=mode.origin)
+        earlier <- coverage_manifest.earlier_entry_estimates(mode.origin)
+        ASSERT every earlier.input_available_at<=mode.origin
+        trajectories[mode.origin] <- {id:mode.origin,group:mode.origin,
+            forecast_keys:SET((r.sample_id,r.h) FOR r IN selected),
+            contributions:GATHER_CONTRIBUTIONS(compensated.contributions,selected)+earlier}
+    ELSE:
+        RETURN Failure(unknown_trajectory_mode,mode.kind)
+    END IF
+    FOR id IN trajectories:
+        items <- trajectories[id].contributions
+        VERIFY_UNIQUE_FORECAST_PER_COHORT(items)
+        trajectories[id].coverage <- coverage_manifest.compare(items.entry_intervals)
+        trajectories[id].unresolved_support <- compensated.unresolved for this trajectory
+        trajectories[id].assignment_gaps <- [g FOR g IN compensated.assignment_gaps
+            WHERE (g.sample_id,g.h) IN trajectories[id].forecast_keys]
+    END FOR
+    RETURN trajectories
+END PROCEDURE
+
+PROCEDURE construct_temporal_dispersion(trajectories, receiving_grid, kernel)
+    INPUT receiving_grid has ordered intervals and directed section/line/direction identities.
+    OUTPUT line-specific receiving volumes and a mass ledger.
+    ASSERT NONOVERLAPPING_ORDERED_INTERVALS(receiving_grid.intervals)
+    Dispersed <- ZEROS_ON_GRID(trajectories.keys,receiving_grid.intervals,
+                              receiving_grid.section_line_directions)
+    ledger <- []
+    coverage <- {}
+    source_records <- {key:SET() FOR key IN Dispersed.keys}
+    FOR trajectory IN VALUES(trajectories):
+        FOR item IN trajectory.contributions:
+            mu <- kernel.delay(item.hops)
+            sigma <- kernel.spread(item.hops)
+            ASSERT FINITE(mu) AND mu>=0 AND FINITE(sigma) AND sigma>=0
+            result <- interval_kernel_weights(item.entry_interval,receiving_grid.intervals,mu,sigma,kernel)
+            FOR (v,weight) IN ENUMERATE(result.weights):
+                key <- (trajectory.id,receiving_grid.intervals[v],item.section,item.line,item.direction)
+                Dispersed[key] <- Dispersed[key]+item.mass*weight
+                IF weight>0:
+                    source_records[key].ADD((item.sample_id,item.h,item.forecast_origin))
+                END IF
+            END FOR
+            APPEND {
+                source:(trajectory.id,item.sample_id,item.h,item.o,item.d,item.path_id,item.section),
+                input_mass:item.mass,
+                output_mass:item.mass*SUM(result.weights),
+                negative_tail_mass:item.mass*result.negative_tail,
+                outside_grid_mass:item.mass*result.outside_grid
+            } TO ledger
+        END FOR
+        FOR key IN Dispersed.keys WHERE key.trajectory=trajectory.id:
+            required_entries <- kernel.required_entry_support(key.interval)
+            coverage[key] <- trajectory.coverage.classify(required_entries,
+                trajectory.unresolved_support,key.section,key.line,key.direction)
+            IF any gap.entry_interval overlaps required_entries FOR gap IN trajectory.assignment_gaps:
+                coverage[key] <- incomplete_assignment
+            END IF
+        END FOR
+    END FOR
+    ASSERT CLOSE(SUM(ledger.input_mass),
+                 SUM(ledger.output_mass+ledger.negative_tail_mass+ledger.outside_grid_mass))
+    RETURN {volumes:Dispersed,ledger:ledger,coverage:coverage,
+            source_records:source_records,trajectories:trajectories,kernel_id:kernel.id}
+END PROCEDURE
+
+PROCEDURE interval_kernel_weights(entry_interval, receiving_grid, mu, sigma, kernel)
+    OUTPUT receiving weights, removed negative-delay fraction and outside-grid fraction.
+    IF kernel.entry_timing=point:
+        nodes <- [(kernel.entry_point(entry_interval),1)]
+    ELSE:
+        nodes <- kernel.quadrature(entry_interval)
+        ASSERT all node weights>=0 AND CLOSE(SUM(node weights),1)
+    END IF
+    weights <- ZEROS(LENGTH(receiving_grid))
+    removed <- 0
+    FOR (entry_time,node_weight) IN nodes:
+        FOR v IN 0..LENGTH(receiving_grid)-1:
+            interval <- receiving_grid[v]
+            low <- TIME_DIFFERENCE(interval.start,entry_time,kernel.time_unit)
+            high <- TIME_DIFFERENCE(interval.end,entry_time,kernel.time_unit)
+            weights[v] <- weights[v]+node_weight*gaussian_interval_mass(
+                low,high,mu,sigma,kernel.negative_delay)
+        END FOR
+        IF kernel.negative_delay=causal_discard AND sigma>0:
+            removed <- removed+node_weight*NORMAL_CDF(0,mu,sigma)
+        END IF
+    END FOR
+    ASSERT SUM(weights)+removed <= 1+kernel.mass_tolerance
+    outside <- MAX(0,1-SUM(weights)-removed)
+    RETURN {weights:weights,negative_tail:removed,outside_grid:outside}
+END PROCEDURE
+
+PROCEDURE gaussian_interval_mass(low, high, mu, sigma, negative_delay)
+    OUTPUT probability mass in the half-open receiving-delay interval [low,high).
+    ASSERT high>=low
+    IF sigma=0:
+        RETURN 1 if low<=mu<high else 0
+    END IF
+    IF negative_delay=full_gaussian:
+        RETURN NORMAL_CDF(high,mu,sigma)-NORMAL_CDF(low,mu,sigma)
+    END IF
+    ASSERT negative_delay IN {causal_discard,causal_renormalized}
+    IF high<=0:
+        RETURN 0
+    END IF
+    low <- MAX(low,0)
+    mass <- NORMAL_CDF(high,mu,sigma)-NORMAL_CDF(low,mu,sigma)
+    IF negative_delay=causal_renormalized:
+        survival <- NORMAL_SURVIVAL(0,mu,sigma)
+        ASSERT survival>0
+        mass <- mass/survival
+    END IF
+    RETURN MAX(0,mass)
+END PROCEDURE
+
+PROCEDURE convert_section_volume_to_train_load(dispersed, service, train_map, conversion)
+    OUTPUT estimates keyed by trajectory, interval, section, line and direction.
+    estimates <- []
+    FOR key IN dispersed.volumes.keys:
+        volume <- dispersed.volumes[key]
+        ASSERT FINITE(volume) AND volume>=0
+        supply <- service.lookup(key.section,key.line,key.direction,key.interval)
+        IF supply is unknown:
+            APPEND {key:key,status:missing_service} TO estimates
+            CONTINUE
+        END IF
+        train_count <- INTEGRATE_FREQUENCY(supply,key.interval)
+        IF train_count=0:
+            status <- no_train_in_interval if volume=0 else incompatible_support
+            APPEND {key:key,status:status,unallocated_volume:volume} TO estimates
+            CONTINUE
+        END IF
+        IF conversion.kind=uniform_arrivals:
+            load <- volume/train_count
+        ELSE:
+            load <- conversion.apply(volume,supply,key,conversion.parameters)
+        END IF
+        # With constant headway h and interval duration Delta: load = volume*h/Delta.
+        train_estimates <- train_map.match_or_interpolate(key,load,conversion.matching)
+        FOR row IN train_estimates:
+            APPEND {key:key,section:key.section,line:key.line,direction:key.direction,
+                    date:row.date,train_id:row.train_id,time:row.time,load:row.load,
+                    horizon_or_trajectory:dispersed.trajectories[key.trajectory].group,
+                    forecast_sources:dispersed.source_records[key],service_id:supply.id,
+                    coverage:dispersed.coverage[key],status:defined} TO estimates
+        END FOR
+    END FOR
+    RETURN estimates
+END PROCEDURE
+
+PROCEDURE align_operational_snapshots(estimates, observations, protocol, horizon_policy)
+    OUTPUT paired rows plus unmatched records.
+    keys <- [section,line,direction,date,train_id]
+    usable <- FILTER(estimates,status=defined)
+    candidates <- JOIN_WITH_TIME_TOLERANCE(usable,observations,keys,time,protocol.matching)
+    paired <- []
+    unmatched <- []
+    FOR observation IN observations:
+        IF observation.quality != valid:
+            APPEND observation.with_status(missing_observation) TO unmatched
+            CONTINUE
+        END IF
+        rows <- candidates[observation.observation_id]
+        rows <- FILTER(rows,status=defined,coverage=protocol.accepted_coverage)
+        IF rows is empty:
+            APPEND observation.with_status(unmatched) TO unmatched
+            CONTINUE
+        END IF
+        selected <- horizon_policy.select(rows)
+        IF selected is ambiguous OR DUPLICATE_GROUPS(selected):
+            APPEND observation.with_status(ambiguous_match) TO unmatched
+            CONTINUE
+        END IF
+        FOR estimate IN selected:
+            APPEND {observation_id:observation.observation_id,
+                    group:estimate.horizon_or_trajectory,section:observation.section,
+                    predicted:estimate.load,observed:observation.train_count,
+                    time:observation.time,forecast_sources:estimate.forecast_sources,
+                    peak:protocol.peak_periods.contains(observation.time)} TO paired
+        END FOR
+    END FOR
+    RETURN {pairs:paired,unmatched:unmatched,policy:horizon_policy}
+END PROCEDURE
+
+PROCEDURE compute_three_level_error_trace(OD, membership, matched, policy)
+    OUTPUT Level 1/2/3 WMAPE and final-load Pearson r by section and horizon policy.
+    results <- []
+    FOR group IN policy.groups:
+        section <- group.section
+        selected_OD <- SELECT_RETAINED_OD_CELLS(OD,membership[section],group.OD_selector)
+        selected_OD <- FILTER_BY_OBSERVATION_MASK(selected_OD)
+        level_1 <- wmape_percent(selected_OD.prediction,selected_OD.truth)
+
+        aggregate <- AGGREGATE_BY_TARGET_RECORD(selected_OD,membership[section].weights,
+                                               policy.aggregate_coverage)
+        level_2 <- wmape_percent(aggregate.prediction,aggregate.truth)
+
+        loads <- FILTER(matched.pairs,section=section,group=group.load_group)
+        level_3 <- wmape_percent(loads.predicted,loads.observed)
+        r <- pearson_correlation(loads.predicted,loads.observed)
+        APPEND {section:section,group:group.id,level_1:level_1,level_2:level_2,
+                level_3:level_3,pearson:r,counts:[COUNT(selected_OD),COUNT(aggregate),COUNT(loads)],
+                membership_id:membership[section].id} TO results
+    END FOR
+    RETURN results
+END PROCEDURE
+
+PROCEDURE wmape_percent(prediction, truth)
+    ASSERT prediction and truth have the same valid paired rows
+    denominator <- SUM(truth)
+    IF denominator=0:
+        RETURN Undefined(zero_total_truth)
+    END IF
+    RETURN 100*SUM(ABS(prediction-truth))/denominator
+END PROCEDURE
+
+PROCEDURE pearson_correlation(prediction, truth)
+    IF COUNT(truth)<2:
+        RETURN Undefined(insufficient_pairs)
+    END IF
+    x <- prediction-MEAN(prediction)
+    y <- truth-MEAN(truth)
+    denominator <- SQRT(SUM(x*x)*SUM(y*y))
+    IF denominator=0:
+        RETURN Undefined(zero_variance)
+    END IF
+    RETURN SUM(x*y)/denominator
+END PROCEDURE
+
+PROCEDURE export_operational_assessment(spatial, calibration, matched, errors, diagnostics, output)
+    OUTPUT artifact receipt.
+    WRITE spatial.mean_section,spatial.links TO output.spatial_tables
+    WRITE matched.pairs,matched.unmatched TO output.load_tables
+    WRITE errors TO output.three_level_table
+    WRITE diagnostics TO output.mass_and_coverage_table
+    WRITE {assessment:indirect_operational_load,calibration:calibration.identities,
+           sampling:matched.policy,units:[passengers_per_interval,passengers_per_train],
+           checkpoint:diagnostics.checkpoint_id} TO output.manifest
+    PLOT spatial maps and top-33 directed links from the exported tables
+    PLOT paired train loads with actual time points and supplied peak-period labels
+    RETURN {tables:output.tables,figures:output.figures,manifest:output.manifest}
+END PROCEDURE
+
+PROCEDURE operational_assessment_main(protocol, inputs, specification, output)
+    OUTPUT assessment receipt or a list of missing inputs.
+    missing <- COLLECT_MISSING(protocol.required_inputs,inputs,specification)
+    IF missing is nonempty:
+        RETURN Pending(missing)
+    END IF
+    protocol <- define_operational_protocol(
+        inputs.sampling_dates,inputs.station_aliases,inputs.annotations,protocol)
+    calibration <- specification.calibration.fit_or_restore(inputs.calibration_records)
+    calibration.freeze()
+
+    forecast <- build_operational_forecast_view(
+        inputs.evaluation,inputs.evaluation.prediction_records,inputs.manifests,protocol)
+    checked <- validate_forecast_assignment_inputs(
+        forecast.forecast_identity,forecast.view,forecast.contexts,inputs.manifests,
+        protocol.operational_policy)
+    IF checked is Failure:
+        RETURN checked
+    END IF
+    assignment <- construct_retained_assignment(
+        checked,inputs.RDS,inputs.section_axis,specification.hop_definition)
+    spatial <- summarize_spatial_assignment(
+        assignment,inputs.origin_ids,inputs.coordinates,protocol.visualization)
+    IF spatial is Pending OR spatial is Empty:
+        RETURN spatial
+    END IF
+    observations <- derive_train_level_observations(inputs.annotations,calibration,protocol)
+    IF observations is Pending:
+        RETURN observations
+    END IF
+    compensated <- compensate_nonretained_volume(
+        assignment.contributions,inputs.residual_metadata,specification.compensation)
+    IF compensated is Pending:
+        RETURN compensated
+    END IF
+    compensated.assignment_gaps <- []
+    FOR (b,h) WHERE NOT assignment.coverage[b,h].complete:
+        APPEND {sample_id:forecast.view.sample_ids[b],h:h,
+                entry_interval:[forecast.view.target_times[b,h],
+                    forecast.view.target_times[b,h]+forecast.view.interval_duration),
+                forecast_origin:forecast.view.forecast_origins[b]} TO compensated.assignment_gaps
+    END FOR
+    trajectories <- assemble_entry_cohort_series(
+        compensated,protocol.trajectory,inputs.entry_coverage)
+    IF trajectories is Failure:
+        RETURN trajectories
+    END IF
+    dispersed <- construct_temporal_dispersion(
+        trajectories,inputs.receiving_grid,specification.kernel)
+    loads <- convert_section_volume_to_train_load(
+        dispersed,inputs.service,inputs.train_map,specification.conversion)
+    matched <- align_operational_snapshots(loads,observations,protocol,protocol.horizon_policy)
+    OD <- {prediction:inputs.evaluation.y_evaluated,truth:inputs.evaluation.y_truth,
+           observation_mask:inputs.evaluation.valid_mask,sample_ids:forecast.view.sample_ids,
+           target_times:forecast.view.target_times,RDS:inputs.RDS}
+    errors <- compute_three_level_error_trace(OD,inputs.section_membership,matched,protocol.errors)
+    diagnostics <- {assignment:assignment.coverage,unassigned:assignment.unassigned,
+                    compensation:compensated.unresolved,kernel:dispersed.ledger,
+                    checkpoint_id:forecast.view.checkpoint_id}
+    RETURN export_operational_assessment(
+        spatial,calibration,matched,errors,diagnostics,output)
+END PROCEDURE

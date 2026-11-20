@@ -1,0 +1,24 @@
+MODULE MetroUtil
+PURPOSE Resolve canonical and legacy line identifiers.
+PAPER Line identity supports Section 4.6.
+
+PROCEDURE get_line_number(key; line_manifest, key_schema)
+    INPUT canonical ID, structured record, or legacy encoded key.
+    OUTPUT canonical line ID including branch identity.
+    IF key is an integer:
+        candidate <- key
+    ELSE IF key is a record with line_id:
+        candidate <- key.line_id
+    ELSE:
+        text <- TRIM surrounding whitespace from key
+        IF text is an explicit identifier in line_manifest:
+            candidate <- line_manifest.resolve(text)
+        ELSE IF key_schema selects two-character numeric prefix encoding:
+            CHECK text has at least two characters and both prefix characters are digits
+            candidate <- PARSE first two characters as integer
+        ELSE:
+            RAISE UnknownLineKey(key)
+        END IF
+    END IF
+    RETURN line_manifest.resolve(candidate)
+END PROCEDURE

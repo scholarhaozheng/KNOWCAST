@@ -1,0 +1,64 @@
+MODULE LineManager
+PURPOSE Manage line sequences, adjacency state and line diagnostics.
+PAPER Sections 4.5–4.8.
+
+CLASS LineManager
+    STATE lines: line ID -> Line
+    STATE adj_mx, station_sequence, topology_version
+END CLASS
+
+PROCEDURE LineManager.__init__()
+    INPUT none.
+    OUTPUT an independent manager.
+    self.lines <- empty mapping
+    self.station_sequence <- empty list
+    self.adj_mx <- UNBUILT
+    self.topology_version <- UNASSIGNED
+    RETURN self
+END PROCEDURE
+
+PROCEDURE LineManager.add_line(line_number, new_station)
+    INPUT canonical line ID and Station.
+    OUTPUT updated manager.
+    IF line_number is absent from self.lines:
+        self.lines[line_number] <- Line(line_number)
+    END IF
+    self.lines[line_number].add_station(new_station)
+    self.adj_mx <- UNBUILT
+    RETURN self
+END PROCEDURE
+
+PROCEDURE LineManager.print_line_info(line_number)
+    INPUT requested line ID.
+    OUTPUT line diagnostic.
+    IF line_number is absent:
+        RETURN EMIT {status=UNKNOWN_LINE, line_number}
+    END IF
+    names <- station names in self.lines[line_number].stations order
+    RETURN EMIT {line_number, ordered_names=names, display=JOIN names with directional arrows}
+END PROCEDURE
+
+PROCEDURE LineManager.print_all_info()
+    INPUT current manager.
+    OUTPUT ordered line diagnostics and line count.
+    diagnostics <- empty list
+    FOR EACH line_id in declared line-manifest order:
+        APPEND self.print_line_info(line_id) to diagnostics
+    END FOR
+    RETURN EMIT {diagnostics, line_count=length(self.lines)}
+END PROCEDURE
+
+PROCEDURE LineManager.print_stops(line_number, from_stop, to_stop)
+    INPUT line ID and canonical endpoint names or IDs.
+    OUTPUT inclusive sequence and section count.
+    stations <- self.lines[line_number].stations
+    start <- unique occurrence of from_stop in stations
+    finish <- unique occurrence of to_stop in stations
+    IF either endpoint is missing or ambiguous:
+        RAISE EndpointOccurrenceError
+    END IF
+    step <- +1 IF finish >= start ELSE -1
+    positions <- inclusive sequence from start to finish using step
+    names <- stations[position].name for each position
+    RETURN EMIT {line_number, names, traversed_sections=abs(finish-start)}
+END PROCEDURE

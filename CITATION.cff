@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "Please cite the published KNOWCAST paper. This edition contains reconstructed pseudocode, not the original experiment-producing implementation."
+title: "KNOWCAST paper companion and reconstructed pseudocode"
+type: software
+authors:
+  - family-names: Zheng
+    given-names: Hao
+  - family-names: Zheng
+    given-names: Han
+  - family-names: Giannopoulos
+    given-names: George
+repository-code: "https://github.com/scholarhaozheng/KNOWCAST"
+preferred-citation:
+  type: article
+  authors:
+    - family-names: Zheng
+      given-names: Hao
+    - family-names: Zheng
+      given-names: Han
+    - family-names: Giannopoulos
+      given-names: George
+  title: "KNOWCAST: Domain-knowledge-integrated deep learning for metro OD forecasting and path flow estimation"
+  journal: "Transportation Research Part C: Emerging Technologies"
+  volume: "189"
+  start: "105710"
+  year: 2026
+  doi: "10.1016/j.trc.2026.105710"

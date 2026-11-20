@@ -1,0 +1,135 @@
+MODULE convert_objects_to_dict
+PURPOSE Encode and decode network records while preserving shared identities and typed values.
+PAPER Infrastructure for Sections 4.5–4.8.
+
+PROCEDURE convert_objects_to_dict(data; policy)
+    INPUT data: a supported record, mapping, sequence, or class-state snapshot.
+    INPUT policy: schema registry, key encoding, reference mode, missing-value encoding.
+    OUTPUT payload: {root, records, schema_version}.
+    memo <- empty identity-to-record map
+    active_objects <- empty set
+    root <- convert_node(data, memo, active_objects, policy)
+    records <- completed records in memo, ordered by record_id
+    RETURN {root, records, schema_version=policy.schema_version}
+END PROCEDURE
+
+PROCEDURE convert_node(value, memo, active_objects, policy)
+    INPUT value and the enclosing conversion's traversal state.
+    OUTPUT a primitive, typed value, inline container, or {type=reference, record_id}.
+    IF value is NULL, Boolean, text, or a finite number:
+        RETURN value
+    END IF
+    IF value is a nonfinite number:
+        RETURN policy.encode_missing(value)
+    END IF
+    IF value is a datetime:
+        RETURN {type=datetime, timestamp=value, timezone, service_day_rule, precision}
+    END IF
+    IF value is a duration:
+        RETURN {type=duration, total_seconds=value.total_seconds}
+    END IF
+    IF value is a dense numeric array:
+        RETURN {type=array, dtype, shape, units, values_in_declared_axis_order}
+    END IF
+    IF value is sparse:
+        RETURN {type=sparse, dtype, shape, units, coordinates, values, coalescing_rule}
+    END IF
+
+    object_id <- identity(value)
+    IF object_id is in active_objects AND policy.reference_mode=acyclic:
+        RAISE CycleError(object_id)
+    END IF
+    IF object_id is in memo:
+        IF policy.reference_mode=graph:
+            RETURN {type=reference, record_id=memo[object_id].record_id}
+        END IF
+        RETURN detached copy of memo[object_id]
+    END IF
+
+    schema <- policy.schema_for(value)
+    IF schema is absent:
+        RAISE UnsupportedType(type(value))
+    END IF
+    record_id <- next conversion-local record ID
+    node <- {record_id, type=schema.record_type, state=BUILDING}
+    memo[object_id] <- node
+    ADD object_id to active_objects
+
+    IF value is a mapping:
+        node.entries <- empty ordered entry list
+        encoded_keys <- empty set
+        FOR EACH (key, item) in value's declared iteration order:
+            encoded_key <- encode key using policy.typed_key_schema
+            IF encoded_key is already in encoded_keys:
+                RAISE KeyCollision(key)
+            END IF
+            ADD encoded_key to encoded_keys
+            encoded_item <- convert_node(item, memo, active_objects, policy)
+            APPEND (encoded_key, encoded_item) to node.entries
+        END FOR
+    ELSE IF value is a list, tuple, or set:
+        node.container_kind <- list, tuple, or set
+        items <- value in original order, or policy's stable presentation order for sets
+        node.items <- empty list
+        FOR EACH item in items:
+            APPEND convert_node(item, memo, active_objects, policy) to node.items
+        END FOR
+    ELSE IF value is a supported class object or stored-field instance:
+        node.fields <- empty mapping
+        node.record_kind <- class_state_snapshot or instance
+        FOR EACH field in schema.stored_data_fields:
+            item <- READ stored field directly
+            node.fields[field] <- convert_node(item, memo, active_objects, policy)
+        END FOR
+    ELSE:
+        RAISE UnsupportedType(type(value))
+    END IF
+
+    REMOVE object_id from active_objects
+    node.state <- COMPLETE
+    memo[object_id] <- node
+    IF policy.reference_mode=graph:
+        RETURN {type=reference, record_id}
+    END IF
+    RETURN detached node
+END PROCEDURE
+
+PROCEDURE load_network_records(artifact, expected_schema, expected_manifest_ids, trust_policy)
+    INPUT serialized artifact, schema, station/line IDs, and declared format policy.
+    OUTPUT {root, provenance}: inert records with shared references resolved.
+    payload <- READ artifact using its declared data format or trusted local-pickle adapter
+    CHECK payload header against expected_schema and expected_manifest_ids
+    IF payload uses the declared acyclic legacy schema:
+        root <- DECODE its typed primitives, keys, arrays and containers under that schema
+        RETURN {root, provenance=payload.header}
+    END IF
+
+    records <- empty record_id-to-container map
+    FOR EACH encoded record in payload.records:
+        IF record.record_id is already in records:
+            RAISE DuplicateRecordID(record.record_id)
+        END IF
+        records[record.record_id] <- empty inert container of the schema-declared kind
+    END FOR
+    FOR EACH encoded record in payload.records:
+        target <- records[record.record_id]
+        FOR EACH encoded entry, item, or stored field:
+            DECODE typed keys while preserving tuple/list distinctions
+            DECODE datetime and duration using stored timezone, precision and total seconds
+            DECODE arrays using dtype, shape, units and ordered values
+            DECODE sparse arrays using shape, coordinates, values and coalescing rule
+            IF a reference is encountered:
+                IF its record_id is absent from records:
+                    RAISE MissingReference(record_id)
+                END IF
+                resolved_value <- records[record_id]
+            END IF
+            INSERT the decoded value into target
+        END FOR
+        CHECK decoded key uniqueness, array element counts and sparse coordinate bounds
+    END FOR
+    root <- RESOLVE payload.root through records
+    CHECK Station/Line/Route/Path/OD/Section fields against expected_schema
+    CHECK station-index bijection, line membership and directed section identities
+    RETURN {root, provenance=payload.header}
+END PROCEDURE

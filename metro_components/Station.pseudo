@@ -1,0 +1,31 @@
+MODULE Station
+PURPOSE Represent one physical station shared by all serving lines.
+PAPER Sections 4.3 and 4.5–4.8.
+
+CLASS Station
+    STATE name, index, lat_lng, coordinate_status
+    STATE lines: ordered set of line IDs
+    STATE station_sequence_of_the_line: line ID -> line-local position
+END CLASS
+
+PROCEDURE Station.__init__(name, index, lat_lng)
+    INPUT canonical name, global station index, coordinates and the network coordinate policy.
+    OUTPUT a new Station.
+    CHECK name is nonempty and index is a nonnegative integer
+    (coordinates,status) <- VALIDATE lat_lng under the coordinate/missing-value policy
+    self.name <- name
+    self.index <- index
+    self.lat_lng <- coordinates
+    self.coordinate_status <- status
+    self.lines <- empty ordered set
+    self.station_sequence_of_the_line <- empty mapping
+    RETURN self
+END PROCEDURE
+
+PROCEDURE Station.add_line(line_number)
+    INPUT canonical serving line ID.
+    OUTPUT updated membership.
+    CHECK line_number belongs to the network line manifest
+    INSERT line_number into self.lines if absent
+    RETURN self
+END PROCEDURE

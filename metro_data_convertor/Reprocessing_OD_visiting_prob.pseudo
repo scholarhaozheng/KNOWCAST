@@ -1,0 +1,53 @@
+MODULE Reprocessing_OD_visiting_prob
+PURPOSE Tensorize OD-conditioned directed section probabilities.
+PAPER Eqs. (24)–(25).
+
+PROCEDURE Reprocessing_OD_visiting_prob(OD_path_visit_prob_dic_file_path,
+                                        OD_path_visit_prob_array_file_path;
+                                        station_manifest, output_variant)
+    INPUT serialized OD records, station manifest, output path and dense/sparse/legacy projection request.
+    OUTPUT {artifact, diagnostics}.
+    source <- load_network_records(OD_path_visit_prob_dic_file_path, expected schema/IDs, trust policy)
+    N <- length(station_manifest)
+    matrices <- empty mapping keyed by (context,origin,destination)
+    FOR EACH (m,n), record in source.root:
+        IF record.probability_status=UNASSIGNABLE:
+            matrices[context,m,n] <- UNAVAILABLE with record provenance
+            CONTINUE
+        END IF
+        IF record contains sec_vst_freq_dic:
+            probabilities <- record.sec_vst_freq_dic
+        ELSE IF contribution semantics are per-path:
+            contributions <- GROUP by (directed physical section,path_id)
+            probabilities <- SUM each distinct path's probability once per section
+        ELSE IF semantics are already aggregated physical sections:
+            probabilities <- COPY each aggregate once
+        ELSE IF semantics are line-aware aggregates with candidate/incidence provenance:
+            probabilities <- RECOMPUTE union incidence per path, then sum path probabilities per physical section
+        ELSE:
+            RAISE AmbiguousProbabilityAggregation
+        END IF
+        matrix <- sparse zeros[N,N]
+        FOR EACH (u,v), probability in probabilities:
+            CHECK directed physical adjacency and probability in [0,1]
+            matrix[u,v] <- probability
+        END FOR
+        matrices[context,m,n] <- matrix, station axes and record provenance
+    END FOR
+    IF output_variant requests dense matrices:
+        CONVERT each sparse matrix to dense[N,N], preserving its OD/time identity
+    END IF
+    legacy_summary <- absent
+    IF output_variant requests legacy line/station summary:
+        legacy_summary <- zeros[N,1] for each line
+        FOR EACH OD record and each line-aware contribution under its recorded semantics:
+            legacy_summary[line][source,0] += contribution.probability
+            legacy_summary[line][destination,0] += contribution.probability
+        END FOR
+        LABEL legacy_summary as endpoint_probability_sum pooled across ODs, without passenger-flow weights
+    END IF
+    artifact <- WRITE {matrices,legacy_summary,axis manifests,context metadata}
+                to OD_path_visit_prob_array_file_path
+    diagnostics <- {OD_count,context_count,N,nonzero_count}
+    RETURN {artifact,diagnostics}
+END PROCEDURE

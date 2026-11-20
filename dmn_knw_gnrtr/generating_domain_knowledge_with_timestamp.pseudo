@@ -1,0 +1,183 @@
+MODULE generating_domain_knowledge_with_timestamp
+PURPOSE Join sample-conditioned service, paths, impedance and covariates on exact timestamps.
+PAPER Eq. (1), Eq. (20), and Sections 4.5–4.7.
+
+PROCEDURE generating_traffic_assignment_knowledge_with_timestamp
+    INPUT base_dir, prefix, repeated_or_not_repeated, seq_len, horizon and sample_manifest.
+    INPUT component_switches, dependency_manifest and missing_knowledge_policy.
+    INPUT optional service_store, path_store, impedance_store, generic_exogenous_records.
+    INPUT optional auxiliary_contracts and auxiliary_feature_store.
+    OUTPUT {encoder_knowledge, decoder_knowledge, accepted_sample_ids, artifacts, diagnostics}.
+    L_h <- seq_len
+    L_f <- horizon
+    path_required <- component_switches.traffic_assignment OR component_switches.path_outputs_requested
+    service_required <- component_switches.depart_freq OR path_required OR generic raw-service dependency
+    distribution_required <- component_switches.trip_distribution
+    auxiliary_required <- component_switches.trip_generation OR distribution_required
+    generic_required <- component_switches.generic_exogenous_enabled
+    CHECK L_h and L_f match sample_manifest
+
+    IF service_required:
+        service_store <- LOAD configured raw K7 store and coverage, with shared station/line IDs
+        CHECK unit=trains_per_hour
+    END IF
+    IF path_required:
+        path_store <- LOAD candidate IDs, attributes, exact incidence, masks and path_status
+        LOAD optional CP factors only when the storage policy requests that auxiliary product
+    END IF
+    IF distribution_required:
+        impedance_store <- LOAD configured generalized-impedance store and units
+    END IF
+    IF (service_required OR path_required) AND repeated_or_not_repeated=repeated:
+        invariant_snapshot <- SELECT the configured service/path snapshot
+        CHECK requested service/path families have declared invariant values, time coverage and availability
+    ELSE IF (service_required OR path_required) AND repeated_or_not_repeated != not_repeated:
+        RAISE InvalidSnapshotMode
+    END IF
+
+    encoder_knowledge <- empty list
+    decoder_knowledge <- empty list
+    accepted_sample_ids <- empty list
+    diagnostics <- empty rejection/missingness report
+    FOR EACH sample in sample_manifest:
+        encoder <- empty list
+        decoder <- empty list
+        status <- ACCEPT
+        FOR EACH (role,times) in {(encoder,sample.xtime), (decoder,sample.ytime)}:
+            FOR EACH tau in times:
+                step <- {sample_id=sample.sample_id, target_time=tau, forecast_origin=sample.forecast_origin}
+                cutoff <- sample.forecast_origin
+                IF service_required:
+                    service <- invariant snapshot at tau IF repeated_or_not_repeated=repeated
+                                ELSE select_available_snapshot(service_store, tau, cutoff, selection_policy)
+                    IF service=UNAVAILABLE:
+                        step.service <- UNAVAILABLE
+                    ELSE:
+                        step.service <- {
+                            raw_frequency=service.raw_values[N,N,L_lines],
+                            structural_support=service.topology_support,
+                            known_status=service.coverage_and_status,
+                            representation_kind=departure_frequency, raw_units=trains_per_hour,
+                            line_order_id, availability=service.provenance
+                        }
+                    END IF
+                END IF
+                IF path_required:
+                    paths <- path_store.resolve(tau, cutoff, step.service)
+                    IF paths=UNAVAILABLE:
+                        step.paths <- UNAVAILABLE
+                    ELSE:
+                        step.paths <- {
+                            by_od[(m,n)]={path_ids, padding_mask, ordered routes and route transitions,
+                                section_features or aligned attributes with their schema},
+                            feasible_sets=paths.feasible_sets, path_status=paths.status,
+                            incidence=paths.binary_directed_physical_section_sets,
+                            line_aware_routes=paths.line_aware_routes,
+                            metadata=paths.candidate_ids_and_provenance
+                        }
+                    END IF
+                END IF
+                IF distribution_required:
+                    impedance <- select_available_snapshot(impedance_store, tau, cutoff, selection_policy)
+                    IF impedance=UNAVAILABLE:
+                        step.dynamic_impedance <- UNAVAILABLE
+                    ELSE:
+                        step.dynamic_impedance <- impedance.values[N,N]
+                        step.dynamic_impedance_metadata <- {
+                            units=impedance.units, target_time=tau, available_at=impedance.available_at,
+                            source_version=impedance.version, support=impedance.support
+                        }
+                    END IF
+                END IF
+                IF auxiliary_required:
+                    step.auxiliary_context_by_task <- empty mapping
+                    FOR EACH task in {production, attraction}:
+                        step.auxiliary_context_by_task[task] <- build_auxiliary_covariate_context(
+                            tau, cutoff, auxiliary_contracts[task], auxiliary_feature_store[task])
+                    END FOR
+                END IF
+                IF generic_required:
+                    step.generic_exogenous_inputs <- GET generic_exogenous_records[sample.sample_id,tau] or UNAVAILABLE
+                    IF step.generic_exogenous_inputs != UNAVAILABLE:
+                        CHECK raw feature schema and available_at <= cutoff
+                    END IF
+                END IF
+                resolution <- missing_knowledge_policy.resolve(step, dependency_manifest)
+                REQUIRE resolution accepts paths only after all candidate availability is resolved
+                IF resolution.status=REJECT:
+                    status <- REJECT
+                    BREAK
+                END IF
+                step <- resolution.complete_step
+                CHECK step target timestamp and every active source's availability <= cutoff
+                APPEND step to encoder IF role=encoder ELSE decoder
+            END FOR
+            IF status=REJECT:
+                BREAK
+            END IF
+        END FOR
+        IF status=REJECT:
+            APPEND {sample.sample_id, reasons} to diagnostics.rejected
+            CONTINUE
+        END IF
+        CHECK length(encoder)=L_h and length(decoder)=L_f
+        APPEND encoder to encoder_knowledge
+        APPEND decoder to decoder_knowledge
+        APPEND sample.sample_id to accepted_sample_ids
+    END FOR
+
+    APPLY accepted_sample_ids to every OD, target, history and feature stream in the shared manifest
+    IF service_required:
+        STACK service matrices as [B,L_h,N,N,L_lines] and [B,L_f,N,N,L_lines]
+        ADD Time_DepartFreDic_Matrix and repeated_Time_DepartFre_Array aliases to their declared bundle fields
+    END IF
+    IF path_required:
+        KEEP sparse/ragged incidence indexed by sample, time, OD and candidate
+        ADD Date_and_time_OD_path_Matrix, repeated_OD_feature_array and repeated_sparse_5D_tensors aliases
+    END IF
+    PRESERVE complete auxiliary inner windows when selecting outer encoder/decoder steps
+    artifacts <- WRITE active fields, alias mapping and shared sample manifest with configured dtype
+    RETURN {encoder_knowledge, decoder_knowledge, accepted_sample_ids, artifacts, diagnostics}
+END PROCEDURE
+
+PROCEDURE build_auxiliary_covariate_context
+    INPUT target_time, forecast_cutoff, saved auxiliary contract, feature store.
+    OUTPUT covariate sequence context or an explicit unavailable/incompatible-target status.
+    READ this estimator's own lookback L_aux_h, forecast coverage, and target-offset convention.
+    DEFINE encoder_covariates[L_aux_h,N,F_aux] and decoder_covariates[L_aux_f,N,F_aux]
+        under the checkpoint's explicitly declared sequence-feature schema and masks.
+    READ L_aux_h and L_aux_f from each auxiliary checkpoint contract.
+    RESOLVE an auxiliary issue anchor allowed by the saved target-offset rule.
+    REQUIRE target_time is represented by that auxiliary prediction sequence.
+    REQUIRE the auxiliary issue anchor and every selected source availability obey forecast_cutoff.
+    SELECT the full chronological encoder covariate window for that anchor.
+    SELECT all required known/announced/forecast decoder covariates for the estimator's rollout.
+    VERIFY exact timestamps, station order, feature width, and transform identity.
+    REQUIRE every unknown future covariate follows the saved forecast/missing-value policy.
+    IF the requested target exceeds the checkpoint's supported sequence coverage:
+        REQUIRE an explicitly saved rollout extension or return incompatible-target status.
+    END IF
+    STORE L_aux_h, L_aux_f, encoder_covariates, decoder_covariates and the declared graph or immutable graph reference.
+    STORE input_times, decoder_times, auxiliary_issue_time, target_time, and zero-based target_offset.
+    REQUIRE 0 <= target_offset < L_aux_f and the indexed output timestamp equals target_time.
+    STORE feature/target transform IDs, checkpoint ID, graph ID, and cutoff provenance.
+    STORE covariate_representation <- the selected feature store's raw or normalized representation.
+    VERIFY encoder and decoder slices share that representation and the declared feature transform ID.
+    STORE full tensors or an immutable feature-store reference plus all exact selection keys.
+    EXCLUDE auxiliary generation labels from this model-input context.
+    RETURN context.
+END PROCEDURE
+
+PROCEDURE select_available_snapshot
+    INPUT source store, valid_time, forecast_cutoff, declared selection policy.
+    OUTPUT selected snapshot and provenance or UNAVAILABLE.
+    FILTER records covering valid_time.
+    FILTER those records to issue_time or observation_time <= forecast_cutoff.
+    IF no record remains:
+        RETURN UNAVAILABLE.
+    END IF
+    APPLY the declared version-precedence rule to the available records.
+    KEEP the selected record's original issue time and valid interval.
+
+    RETURN selected snapshot and provenance.
+END PROCEDURE

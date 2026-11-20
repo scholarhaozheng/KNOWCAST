@@ -1,0 +1,274 @@
+MODULE models.OD_Net_att
+PURPOSE Recurrent encoder branches, unfinished-demand fusion and OD decoder.
+PAPER Sections 3.2, 4.2.4 and 4.8; Eqs. (9)-(13), (31)-(33).
+INPUT Graph-batched features with V_total=B*N nodes and explicit sample segmentation.
+OUTPUT Hidden states[V_total,h] and OD readout[B,N,R+1].
+PARAMETERS Feature widths, recurrent layers, learner profile, gating_spec and readout.
+FORMAT Non-executable pseudocode; supplied gating dimensions specify an implementation of Eq. (10).
+
+CLASS ODNet_att
+    PARAMETERS Finished/day/week/month cells, upper encoder layers, decoder layers and readout.
+    PARAMETERS Active fusion parameters; separate legacy modules only in the legacy profile.
+END CLASS
+
+PROCEDURE ODNet_att.__init__(cfg, logger)
+    N,h,L,K_od <- cfg.model node count, recurrent width, layer count and OD width.
+    history_distribution <- cfg.component_switches.history_distribution.
+    profile <- cfg.model.architecture.encoder_profile.
+    layouts <- cfg.model.feature_layouts.
+    cell_options <- cfg.model.recurrent.
+    encoder_first_finished_cells <- REGISTER make_recurrent_cell(layouts.finished.width,h,cell_options).
+    IF history_distribution:
+        encoder_first_unfinished_cells <- REGISTER make_recurrent_cell(layouts.unfinished.width,h,cell_options).
+        encoder_first_short_his_cells <- REGISTER make_recurrent_cell(layouts.unfinished.width,h,cell_options).
+        IF profile=paper:
+            encoder_first_month_his_cells <- REGISTER make_recurrent_cell(layouts.unfinished.width,h,cell_options).
+            reference_cells <- {day:encoder_first_short_his_cells,
+                week:encoder_first_unfinished_cells,month:encoder_first_month_his_cells}.
+            gating_layer <- REGISTER ConfiguredGatingLayer(cfg.model.gating_spec,h).
+        ELSE IF profile=legacy_two_reference:
+            unfinished_output_layer <- REGISTER pointwise affine 2h->h.
+            unfinished_hidden_layer <- REGISTER pointwise affine 2h->2h.
+            unfinished_hidden_double_layer <- REGISTER pointwise affine 2h->4h.
+            attention_layer <- REGISTER ConfiguredGatingLayer(cfg.model.legacy_attention_spec,input_width=4h).
+            gate_layer <- REGISTER pointwise affine 4h->h.
+            gate_linear <- parameter record for the optional legacy 2->2 projection.
+            EXCLUDE unused unfinished_output_layer,unfinished_hidden_layer,gate_linear from the active optimizer.
+        END IF.
+    END IF.
+    encoder_second_cells,decoder_second_cells <- empty registered lists.
+    FOR index=0..L-2:
+        APPEND make_recurrent_cell(h,h,cell_options) to encoder_second_cells.
+        APPEND make_recurrent_cell(h,h,cell_options) to decoder_second_cells.
+    END FOR.
+    decoder_first_cells <- REGISTER make_recurrent_cell(layouts.decoder.width,h,cell_options).
+    output_type <- cfg.model.output_type.
+    IF output_type=fc:
+        output_layer_matrix[K_od,h],output_layer_bias[K_od] <- INITIALIZE(cfg.initializer).
+        REGISTER both tensors.
+    ELSE:
+        output_map <- REGISTER cfg.model.readout_parameterized_map.
+    END IF.
+    RETURN this network.
+END PROCEDURE
+
+PROCEDURE make_recurrent_cell(input_width, hidden_width, options)
+    IF options.learner=GCN:
+        RETURN GGRUCell(in_channels=input_width,out_channels=hidden_width,options=options).
+    ELSE IF options.learner in {GAT,GATRU}:
+        RETURN GATRUCell(in_channels=input_width,out_channels=hidden_width,options=options).
+    ELSE:
+        RAISE Error(learner_requires_complete_forecast_adapter,options.learner).
+    END IF.
+END PROCEDURE
+
+PROCEDURE ODNet_att.positional_encoding(seq_len, d_model)
+    INPUT Position count and encoding width; sinusoidal option.
+    pe <- zeros[seq_len,1,d_model].
+    FOR p=0..seq_len-1:
+        FOR q with 2q<d_model:
+            angle <- p*EXP(-LOG(10000)*2q/d_model).
+            pe[p,0,2q] <- SIN(angle).
+            IF 2q+1<d_model: pe[p,0,2q+1] <- COS(angle).
+        END FOR.
+    END FOR.
+    RETURN pe.
+END PROCEDURE
+
+PROCEDURE ODNet_att.encoder_first_layer(variable_arguments, named_options)
+    IF named_options contains day/week/month reference_states:
+        RETURN encoder_first_layer_paper(named_options.batch,named_options.finished_hidden,
+            named_options.reference_states,named_options.edge_index,named_options.edge_attr,named_options.fuse_now).
+    ELSE IF length(variable_arguments)=6:
+        RETURN _encoder_first_layer_v1 with those ordered arguments.
+    ELSE IF length(variable_arguments)=4:
+        RETURN _encoder_first_layer_v2 with those ordered arguments.
+    ELSE:
+        RAISE Error(incompatible_encoder_arguments).
+    END IF.
+END PROCEDURE
+
+PROCEDURE ODNet_att._encoder_first_layer_v1(batch, finished_hidden,
+    long_his_hidden, short_his_hidden, edge_index, edge_attr=absent)
+    INPUT Legacy finished/week/day features with a verified graph layout.
+    finished_out,finished_hidden <- encoder_first_finished_cells.forward(batch.x_od,edge_index,edge_attr,finished_hidden).
+    _,long_his_hidden <- encoder_first_unfinished_cells.forward(batch.history,edge_index,edge_attr,long_his_hidden).
+    _,short_his_hidden <- encoder_first_short_his_cells.forward(batch.yesterday,edge_index,edge_attr,short_his_hidden).
+    B <- number of graphs in batch.layout.
+    combined <- RESHAPE(CONCATENATE(short_his_hidden,long_his_hidden),[B,N,2h]).
+    projected <- unfinished_hidden_double_layer(combined) with shape [B,N,4h].
+    positions <- RESHAPE(attention_layer.position_values(batch.layout),[B,N,4h]).
+    tokens <- projected+positions.
+    attended <- attention_layer.attend(tokens,tokens,tokens,mask=absent).
+    contribution <- RESHAPE(gate_layer(attended),[B*N,h]).
+    RETURN finished_out+contribution,finished_hidden,long_his_hidden,short_his_hidden,
+        finished_hidden+contribution.
+END PROCEDURE
+
+PROCEDURE ODNet_att._encoder_first_layer_v2(batch, finished_hidden, edge_index, edge_attr=absent)
+    out,hidden <- encoder_first_finished_cells.forward(batch.x_od,edge_index,edge_attr,finished_hidden).
+    RETURN out,hidden,hidden.
+END PROCEDURE
+
+PROCEDURE ODNet_att.encoder_second_layer(index, first_out, enc_second_hidden, edge_index, edge_attr)
+    RETURN encoder_second_cells[index].forward(first_out,edge_index,edge_attr,enc_second_hidden).
+END PROCEDURE
+
+PROCEDURE ODNet_att.decoder_first_layer(decoder_input, dec_first_hidden, edge_index, edge_attr=absent)
+    INPUT Previous OD plus this interval's knowledge, shape [V_total,F_decoder].
+    RETURN decoder_first_cells.forward(decoder_input,edge_index,edge_attr,dec_first_hidden).
+END PROCEDURE
+
+PROCEDURE ODNet_att.decoder_second_layer(index, decoder_first_out, dec_second_hidden, edge_index, edge_attr=absent)
+    RETURN decoder_second_cells[index].forward(decoder_first_out,edge_index,edge_attr,dec_second_hidden).
+END PROCEDURE
+
+PROCEDURE ODNet_att.encoder_first_layer_paper(batch, finished_hidden, reference_states,
+    edge_index, edge_attr, fuse_now)
+    _,finished_hidden <- encoder_first_finished_cells.forward(
+        batch.finished_features,edge_index,edge_attr,finished_hidden).
+    FOR reference in [day,week,month]:
+        _,reference_states[reference] <- reference_cells[reference].forward(
+            batch.unfinished_features[reference],edge_index,edge_attr,reference_states[reference]).
+    END FOR.
+    IF fuse_now:
+        fused <- fuse_paper_states(reference_states,finished_hidden,batch.layout).
+        RETURN fused,finished_hidden,reference_states,fused.
+    ELSE:
+        RETURN absent,finished_hidden,reference_states,absent.
+    END IF.
+END PROCEDURE
+
+PROCEDURE ODNet_att.fuse_paper_states(reference_states, finished_state, layout)
+    INPUT Final day/week/month and finished states, each [V_total,h].
+    combined <- CONCATENATE(reference_states.day,reference_states.week,reference_states.month,feature_axis).
+    Z <- combined + gating_layer.position_values(layout) with shape [V_total,3h].
+    logits <- gating_layer.forward(Z,Z,Z,layout).
+    day_logit,week_logit,month_logit <- SPLIT(logits,three width-h feature blocks).
+    unfinished <- SIGMOID(day_logit)*reference_states.day
+        + SIGMOID(week_logit)*reference_states.week
+        + SIGMOID(month_logit)*reference_states.month.
+    RETURN unfinished+finished_state.
+END PROCEDURE
+
+PROCEDURE ODNet_att.apply_readout(last_hidden, graph_layout)
+    IF output_type=fc:
+        rows <- last_hidden*TRANSPOSE(output_layer_matrix)+output_layer_bias.
+    ELSE:
+        rows <- output_map(last_hidden).
+    END IF.
+    RETURN RESHAPE_BY_GRAPH(rows,graph_layout,[runtime_B,N,K_od]).
+END PROCEDURE
+
+PROCEDURE ODNet_att.check_branch_connectivity(verification_fixture)
+    INPUT A runnable implementation supplied separately and controlled branch perturbations.
+    FOR reference in [day,week,month]:
+        baseline <- verification_fixture.forward().
+        changed <- verification_fixture.forward(perturb_only=reference).
+        RECORD context difference and gradients for the corresponding cell and gate parameters.
+    END FOR.
+    REPEAT with shuffled sample order and a smaller final minibatch.
+    RETURN measured branch, ordering and gradient results.
+END PROCEDURE
+
+CLASS ConfiguredGatingLayer
+    PURPOSE Parameterized multihead attention for the Eq. (10) GatingLayer.
+    INPUT Query/key/value tokens with equal embedding width E.
+    OUTPUT Gate logits with the same token layout and embedding width.
+    PARAMETERS heads, key_width, value_width, tokenization, position_spec, dropout.
+    PARAMETERS Q/K/V projection matrices, output projection and optional post-affine layers.
+    This architecture is a supplied realization; the paper fixes Q=K=V and the three output blocks.
+END CLASS
+
+PROCEDURE ConfiguredGatingLayer.__init__(spec, hidden_width=absent, input_width=absent)
+    missing <- absent spec fields among heads,key_width,value_width,tokenization,position,dropout,post_layers.
+    IF missing is nonempty: RAISE Error(missing_parameters,missing).
+    h <- hidden_width; flat_width <- 3h if hidden_width is present, otherwise input_width.
+    IF spec.tokenization=station_tokens:
+        E <- flat_width.
+    ELSE IF spec.tokenization=reference_tokens AND hidden_width is present:
+        E <- h.
+    ELSE:
+        RAISE Error(incompatible_gating_tokenization).
+    END IF.
+    H,d_key,d_value <- spec.heads,spec.key_width,spec.value_width.
+    W_Q[H*d_key,E],W_K[H*d_key,E],W_V[H*d_value,E],W_O[E,H*d_value] <- INITIALIZE(spec.initializer).
+    ALLOCATE projection biases only where spec.bias flags are true.
+    REGISTER these projections and any present biases.
+    post_layers <- empty registered list; previous_width <- E.
+    FOR layer_spec in spec.post_layers:
+        layer.weight[layer_spec.width,previous_width],layer.bias[layer_spec.width] <- INITIALIZE(spec.initializer).
+        layer.activation,layer.dropout <- layer_spec.activation,layer_spec.dropout.
+        REGISTER layer parameters and APPEND layer to post_layers.
+        previous_width <- layer_spec.width.
+    END FOR.
+    IF spec.position.kind=learned:
+        registered_position_table <- REGISTER INITIALIZE([spec.position.num_positions,E],spec.initializer).
+    END IF.
+    CHECK previous_width=E, H/d_key/d_value are positive, and every dropout rate is in [0,1).
+    STORE spec and these dimensions.
+    RETURN this gating layer.
+END PROCEDURE
+
+PROCEDURE ConfiguredGatingLayer.position_values(layout)
+    INPUT Station identities and sample segmentation.
+    B,N <- layout.sample_count,layout.nodes_per_graph.
+    IF spec.tokenization=station_tokens:
+        positions <- station positions 0..N-1.
+        target_shape <- [B,N,E].
+    ELSE:
+        positions <- reference positions [day,week,month].
+        target_shape <- [B,N,3,h].
+    END IF.
+    IF spec.position.kind=provided:
+        values <- LOOKUP(spec.position.table,positions).
+    ELSE IF spec.position.kind=learned:
+        values <- LOOKUP(registered_position_table,positions).
+    ELSE IF spec.position.kind=sinusoidal:
+        values <- ODNet_att.positional_encoding(length(positions),E) with singleton batch axis removed.
+    ELSE:
+        RAISE Error(unknown_position_encoding).
+    END IF.
+    packed <- BROADCAST(values,target_shape over sample and any nonposition node axes).
+    RETURN RESHAPE(packed,[B*N,flat_width]) using the original station/reference order.
+END PROCEDURE
+
+PROCEDURE ConfiguredGatingLayer.forward(query, key, value, layout)
+    INPUT Matrices [B*N,flat_width].
+    B,N <- layout.sample_count,layout.nodes_per_graph.
+    IF spec.tokenization=station_tokens:
+        Q,K,V <- RESHAPE each input to [B,N,E].
+    ELSE:
+        Q,K,V <- RESHAPE each input to [B*N,3,h].
+    END IF.
+    mask <- spec.attention_mask for these within-group tokens, or absent.
+    attended <- attend(Q,K,V,mask).
+    RETURN RESHAPE(attended,[B*N,flat_width]).
+END PROCEDURE
+
+PROCEDURE ConfiguredGatingLayer.attend(query, key, value, mask)
+    INPUT Tensors [G,T,E]; G is an independent attention-group axis.
+    G,T,E <- SHAPE(query).
+    Q <- RESHAPE_HEADS(query*TRANSPOSE(W_Q)+optional_bias_Q,[G,H,T,d_key]).
+    K <- RESHAPE_HEADS(key*TRANSPOSE(W_K)+optional_bias_K,[G,H,T,d_key]).
+    V <- RESHAPE_HEADS(value*TRANSPOSE(W_V)+optional_bias_V,[G,H,T,d_value]).
+    scores <- Q*TRANSPOSE_LAST_TWO(K)/SQRT(d_key).
+    IF mask is present: SET masked scores <- -infinity.
+    IF any token has no allowed key: RAISE Error(empty_attention_neighborhood).
+    maximum <- MAX(scores,key_axis).
+    weights <- EXP(scores-maximum)/SUM(EXP(scores-maximum),key_axis).
+    IF training_mode AND spec.dropout>0:
+        weights <- BERNOULLI(1-spec.dropout,SHAPE(weights))*weights/(1-spec.dropout).
+    END IF.
+    heads <- weights*V.
+    joined <- MERGE_HEADS(heads,[G,T,H*d_value]).
+    output <- joined*TRANSPOSE(W_O)+optional_bias_O.
+    FOR layer in post_layers in their supplied order:
+        output <- layer.activation(output*TRANSPOSE(layer.weight)+layer.bias).
+        IF training_mode AND layer.dropout>0:
+            output <- BERNOULLI(1-layer.dropout,SHAPE(output))*output/(1-layer.dropout).
+        END IF.
+    END FOR.
+    RETURN output[G,T,E].
+END PROCEDURE
+END MODULE
